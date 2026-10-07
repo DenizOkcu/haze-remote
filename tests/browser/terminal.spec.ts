@@ -49,6 +49,16 @@ async function pair(page: import('@playwright/test').Page, navigate = true) {
   await expect(page.getByRole('status')).toHaveText('Connected');
 }
 
+/** Deliver text through the real keyboard input path (no queueing, no replay). */
+async function type(page: import('@playwright/test').Page, text: string) {
+  await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
+  await page.keyboard.insertText(text);
+}
+
+async function enter(page: import('@playwright/test').Page) {
+  await page.keyboard.press('Enter');
+}
+
 test('tablet two-way pairing, encryption on LAN HTTP, input, reconnect, one device and revocation', async ({ page, context, browser }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -60,11 +70,11 @@ test('tablet two-way pairing, encryption on LAN HTTP, input, reconnect, one devi
   await pair(page, false);
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('READY');
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
-  await page.getByLabel('Message to Haze').fill('tablet café 🦊');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  // Startup puts the cursor in the terminal: typing works immediately.
+  await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
+  await page.keyboard.insertText('tablet café 🦊');
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('tablet café 🦊');
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
-  await page.getByRole('button', { name: 'Keyboard', exact: true }).click();
+  await enter(page);
   await page.keyboard.type('k');
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('INPUT "k"');
   await page.setViewportSize({ width: 1194, height: 834 });
@@ -73,14 +83,17 @@ test('tablet two-way pairing, encryption on LAN HTTP, input, reconnect, one devi
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('tablet café 🦊');
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
+  await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
   const before = (await readFile(join(cwd, 'heartbeat.txt'))).length;
   await context.setOffline(true);
   await page.evaluate(() => (window as any).__sockets.forEach((ws: WebSocket) => ws.close()));
   await expect(page.getByRole('status')).toHaveText('Reconnecting');
-  await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeDisabled();
+  // The touch keys are gone; keyboard input alone reaches the terminal.
+  await expect(page.getByRole('button', { name: 'Latest output' })).toBeEnabled();
   await expect.poll(async () => (await readFile(join(cwd, 'heartbeat.txt'))).length).toBeGreaterThan(before);
   await context.setOffline(false);
-  await expect(page.getByRole('status')).toHaveText('Connected');
+  // Reconnect backoff can reach 8s after repeated disconnects; allow it to elapse.
+  await expect(page.getByRole('status')).toHaveText('Connected', { timeout: 15_000 });
   await page.route('**/api/info', async route => { await new Promise(r => setTimeout(r, 200)); await route.continue(); });
   await page.evaluate(() => {
     (window as any).__sockets.forEach((ws: WebSocket) => ws.close());
@@ -89,13 +102,12 @@ test('tablet two-way pairing, encryption on LAN HTTP, input, reconnect, one devi
     window.dispatchEvent(new Event('online'));
   });
   await expect(page.getByRole('status')).toHaveText('Reconnecting');
-  await expect(page.getByRole('status')).toHaveText('Connected');
+  await expect(page.getByRole('status')).toHaveText('Connected', { timeout: 15_000 });
   await expect.poll(() => page.evaluate(() => (window as any).__sockets.filter((ws: WebSocket) => ws.readyState === WebSocket.OPEN).length)).toBe(1);
   await page.unroute('**/api/info');
-  await page.getByLabel('Message to Haze').fill('x'.repeat(70 * 1024));
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  await page.evaluate(() => { history.replaceState(null, '', '#paste'); });
+  await type(page, 'y'.repeat(70 * 1024));
   await expect(page.getByRole('alert')).toContainText('Paste is too large');
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('x'.repeat(70 * 1024));
   const second = await context.newPage();
   await second.goto(origin);
   await expect(second.getByRole('status')).toHaveText('Already connected');
@@ -120,91 +132,45 @@ test('tablet two-way pairing, encryption on LAN HTTP, input, reconnect, one devi
   expect(errors).toEqual([]);
 });
 
-test('installed Haze renders, accepts pasted /help and Enter, reconnects and exits over encrypted transport', async ({ page }) => {
+test('installed Haze renders, accepts typed /help and Enter, reconnects and exits over encrypted transport', async ({ page }) => {
   await pair(page);
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText(/Configured providers:\s*0/);
-  await page.getByLabel('Message to Haze').fill('/help');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  await type(page, '/help');
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('/help');
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await enter(page);
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('/exit');
   await page.reload();
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('/exit');
-  await page.getByLabel('Message to Haze').fill('/exit');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  await type(page, '/exit');
   await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('› /exit');
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await enter(page);
   await expect(page.getByRole('status')).toHaveText('Exited (0)', { timeout: 20000 });
 });
 
-test('cockpit keeps drafts on failed and uncertain paste, requires explicit Enter and never replays', async ({ page, context }) => {
+test('terminal input is not sent while the connection is down and is never replayed', async ({ page, context }) => {
   await pair(page);
-  const draft = page.getByLabel('Message to Haze');
-  const paste = page.getByRole('button', { name: 'Paste', exact: true });
-  await draft.fill('first line\nsecond café 🦊');
-  await page.evaluate(() => {
-    const ws = (window as any).__sockets.find((ws: WebSocket) => ws.readyState === WebSocket.OPEN);
-    Object.defineProperty(ws, 'bufferedAmount', { configurable: true, get: () => 300 * 1024 });
-  });
-  await paste.click();
-  await expect(page.getByRole('alert')).toContainText('Input was not sent');
-  await expect(draft).toHaveValue('first line\nsecond café 🦊');
-  await expect(page.locator('.composer-feedback')).toContainText('Draft retained');
-  await expect(page.getByLabel('Haze terminal', { exact: true })).not.toContainText('first line');
-  await page.evaluate(() => {
-    (window as any).__sockets.forEach((ws: WebSocket) => { delete (ws as any).bufferedAmount; });
-  });
-  await paste.click();
-  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('first line');
-  await expect(page.locator('.composer-feedback')).toContainText('not confirmed by Haze');
-  await expect(draft).toHaveValue('first line\nsecond café 🦊');
-  page.once('dialog', dialog => dialog.dismiss());
-  await paste.click(); // Duplicate paste requires an explicit decision.
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
-  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('INPUT "\\r"');
+  await type(page, 'offline line');
+  await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('offline line');
   await context.setOffline(true);
   await page.evaluate(() => (window as any).__sockets.forEach((ws: WebSocket) => ws.close()));
   await expect(page.getByRole('status')).toHaveText('Reconnecting');
-  await expect(paste).toBeDisabled();
+  // Once reconnected, the earlier offline input has not been silently re-sent.
   await context.setOffline(false);
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await expect(draft).toHaveValue('first line\nsecond café 🦊');
-  expect((await page.getByLabel('Haze terminal', { exact: true }).textContent())?.match(/INPUT "first line/g)?.length).toBe(1);
+  expect((await page.locator('[aria-label="Haze terminal"]').textContent())?.match(/INPUT "offline line/g)?.length).toBe(1);
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
-  await draft.fill('p'.repeat(5000));
-  await page.evaluate(() => {
-    // Install during this submit, not before click/scroll/resize processing.
-    // The first input frame is queued; the next frame encounters backpressure.
-    document.querySelector('.composer')!.addEventListener('submit', () => {
-      const ws = (window as any).__sockets.find((ws: WebSocket) => ws.readyState === WebSocket.OPEN);
-      let reads = 0;
-      Object.defineProperty(ws, 'bufferedAmount', { configurable: true, get: () => ++reads === 1 ? 0 : 300 * 1024 });
-    }, { capture: true, once: true });
-  });
-  await paste.click();
-  await expect(page.getByRole('alert')).toContainText('uncertain or partial');
-  await expect(draft).toHaveValue('p'.repeat(5000));
-  page.once('dialog', dialog => dialog.dismiss());
-  await paste.click();
-  await expect(draft).toHaveValue('p'.repeat(5000));
 });
 
-test('cockpit instructions, readability, recovery and unpair confirmation', async ({ page, context }) => {
+test('cockpit readability, recovery and unpair confirmation', async ({ page, context }) => {
   await pair(page);
   await expect(page.getByText(/Last authenticated contact/)).toBeVisible();
-  await page.getByLabel('Message to Haze').fill('My existing goal');
-  await page.getByLabel('Quick instruction', { exact: true }).selectOption({ label: 'Verify the work' });
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('My existing goal\n\nRun the relevant tests and report any failures before continuing.');
-  await expect(page.getByLabel('Haze terminal', { exact: true })).not.toContainText('My existing goal');
   await page.getByRole('button', { name: 'Larger terminal text' }).click();
   await expect(page.getByText('16px', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Expand composer' }).click();
-  await expect(page.getByRole('button', { name: 'Compact composer' })).toHaveAttribute('aria-expanded', 'true');
   await page.getByRole('button', { name: 'Latest output' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('button', { name: 'Paste', exact: true })).toBeInViewport();
+  await expect(page.locator('[aria-label="Haze terminal"]')).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   page.once('dialog', async dialog => {
     expect(dialog.message()).toContain('Haze keeps running');
@@ -216,22 +182,18 @@ test('cockpit instructions, readability, recovery and unpair confirmation', asyn
   await page.evaluate(() => (window as any).__sockets.forEach((ws: WebSocket) => ws.close()));
   await expect(page.getByRole('status')).toHaveText('Reconnecting');
   await page.getByRole('button', { name: 'Retry now' }).click();
-  await expect(page.getByLabel('Message to Haze')).toHaveValue(/My existing goal/);
   await context.setOffline(false);
   await expect(page.getByRole('status')).toHaveText('Connected');
   await page.reload();
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(page.getByText('16px', { exact: true })).toBeVisible();
-  await expect(page.getByLabel('Message to Haze')).toHaveValue(''); // No sensitive prompt persistence.
 });
 
-
-test('fleet tabs launch real PTYs, isolate drafts and input, reconnect without duplication, and stop independently', async ({ page, context }) => {
+test('fleet tabs launch real PTYs, isolate terminal input, reconnect without duplication, and stop independently', async ({ page, context }) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   await pair(page);
   await expect(page.getByRole('button', { name: 'Changes', exact: true })).toHaveCount(0);
   await expect(page.getByRole('tab', { name: /Haze 1/ })).toHaveAttribute('aria-selected', 'true');
-  await page.getByLabel('Message to Haze').fill('primary draft');
   await page.getByRole('button', { name: 'New instance' }).click();
   await page.getByLabel('Instance name', { exact: true }).fill('Tests agent');
   await expect(page.getByRole('button', { name: 'Start Haze' })).toBeDisabled();
@@ -241,24 +203,17 @@ test('fleet tabs launch real PTYs, isolate drafts and input, reconnect without d
   const secondTab = page.getByRole('tab', { name: /Tests agent/ });
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('');
   const secondPid = Number((await page.locator('.session-meta').textContent())?.match(/PID (\d+)/)?.[1]);
   expect(secondPid).toBeGreaterThan(0); expect(secondPid).not.toBe(remote.pid);
-  await page.getByLabel('Message to Haze').fill('second instance only');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  await type(page, 'second instance only');
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('second instance only');
-  await expect(page.getByLabel('Haze terminal', { exact: true })).not.toContainText('primary draft');
   await firstTab.click();
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('primary draft');
   await expect(page.getByLabel('Haze terminal', { exact: true })).not.toContainText('second instance only');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
-  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('primary draft');
   await firstTab.focus(); await page.keyboard.press('ArrowRight');
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('second instance only');
   await context.setOffline(true);
   await page.evaluate(() => (window as any).__sockets.forEach((ws: WebSocket) => ws.close()));
   await expect(page.getByRole('status')).toHaveText('Reconnecting');
@@ -269,7 +224,6 @@ test('fleet tabs launch real PTYs, isolate drafts and input, reconnect without d
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab')).toHaveCount(2);
   await expect(page.locator('.session-meta')).toContainText(`PID ${secondPid}`);
-  await expect(page.getByLabel('Message to Haze')).toHaveValue('second instance only');
   await page.reload();
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
@@ -281,7 +235,6 @@ test('fleet tabs launch real PTYs, isolate drafts and input, reconnect without d
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: 'Stop instance' }).click();
   await expect(page.getByRole('status')).toContainText('Exited');
-  await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeDisabled();
   process.kill(remote.pid, 0); expect(() => process.kill(secondPid, 0)).toThrow();
   await page.getByRole('button', { name: 'Close tab' }).click();
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
@@ -331,9 +284,8 @@ test('subagent sidebar shows observed runs with live output and retains finished
 
 test('installed Haze fleet launches independent native instances and exits one without stopping the other', async ({ page }) => {
   await pair(page);
-  await page.getByLabel('Message to Haze').fill('/help');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await type(page, '/help');
+  await enter(page);
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('/exit');
   await page.getByRole('button', { name: 'New instance' }).click();
   await page.getByLabel('Instance name', { exact: true }).fill('Native second');
@@ -344,9 +296,8 @@ test('installed Haze fleet launches independent native instances and exits one w
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText(/Configured providers:\s*0/);
   const secondPid = Number((await page.locator('.session-meta').textContent())?.match(/PID (\d+)/)?.[1]);
   expect(secondPid).toBeGreaterThan(0); expect(secondPid).not.toBe(remote.pid);
-  await page.getByLabel('Message to Haze').fill('/help');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await type(page, '/help');
+  await enter(page);
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('/exit');
   await page.getByRole('tab', { name: /Haze 1/ }).click();
   await expect(page.getByRole('status')).toHaveText('Connected');
@@ -355,10 +306,9 @@ test('installed Haze fleet launches independent native instances and exits one w
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
   await page.getByRole('tab', { name: /Native second/ }).click();
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await page.getByLabel('Message to Haze').fill('/exit');
-  await page.getByRole('button', { name: 'Paste', exact: true }).click();
+  await type(page, '/exit');
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› /exit');
-  await page.getByRole('button', { name: 'Enter', exact: true }).click();
+  await enter(page);
   await expect(page.getByRole('status')).toHaveText('Exited (0)', { timeout: 20000 });
   process.kill(remote.pid, 0);
   await page.getByRole('tab', { name: /Haze 1/ }).click();

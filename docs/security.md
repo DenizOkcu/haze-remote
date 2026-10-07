@@ -68,7 +68,7 @@ Subagent telemetry comes from an in-process observer, not session-file reads. Ea
 Only allowlisted fields are forwarded per run: IDs, scope, mode, a bounded short objective, lifecycle enums, durations, streamed text-delta text, tool names, and the final deliverable. Provider configuration/credentials, reasoning traces, tool inputs/outputs, and full prompts are never forwarded. Only the currently inspected run's output streams to the controller; other runs expose lifecycle metadata only. Run history is RAM-resident per Haze process and disappears with it. There is no worker process/terminal-control API and no parsing of ANSI output into fictional worker states.
 
 
-Drafts and paste feedback are scoped per instance in browser memory, not persisted across reload. Font size alone is stored as a local preference. Failed/partial paste retains the draft and is never replayed automatically. Local enqueue feedback does not promise PTY receipt. A failed encrypted write closes the connection rather than reusing an advanced secretstream state.
+Input goes directly from the focused terminal to the selected instance over the encrypted channel; no prompt text is composed or persisted in the page, and nothing is queued or replayed automatically across disconnects. Font size alone is stored as a local preference. Local enqueue feedback does not promise PTY receipt. A failed encrypted write closes the connection rather than reusing an advanced secretstream state.
 
 ## Verification and remaining work
 

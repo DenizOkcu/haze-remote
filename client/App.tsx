@@ -10,7 +10,6 @@ import type { FleetState, FleetRequest } from '../shared/fleet.js';
 import type { WorkerOutput } from '../shared/observer.js';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
-type DraftMemory = { text: string; feedback: string; lastPaste?: { text: string; result: InputResult } };
 type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
 const requestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 export function App() {
@@ -27,7 +26,6 @@ export function App() {
   const [pid, setPid] = useState<number>();
   const [exitCode, setExitCode] = useState<number>();
   const [epoch, setEpoch] = useState(0);
-  const [draft, setDraftState] = useState('');
   const [fleet, setFleet] = useState<FleetState>();
   const [activeId, setActiveId] = useState('');
   const [operation, setOperation] = useState<string>();
@@ -39,26 +37,20 @@ export function App() {
   const [watchedWorker, setWatchedWorker] = useState<string>();
   const [workerOutput, setWorkerOutput] = useState<WorkerOutput>();
   const display = useRef<{ id: string; viewId: string }>({ id: '', viewId: '' });
-  const draftMemory = useRef(new Map<string, DraftMemory>());
   const seen = useRef(new Map<string, number>());
   const pendingOperation = useRef<{ id: string; type: FleetRequest['type'] } | undefined>(undefined);
   const operationTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fleetRequest = useRef<(request: FleetRequest) => void>(() => {});
-  const [pasteFeedback, setPasteFeedbackState] = useState('');
   const [fontSize, setFontSize] = useState(() => {
     try { const value = Number(localStorage.getItem('haze-remote-font-size')); return value >= 12 && value <= 24 ? value : 14; }
     catch { return 14; }
   });
-  const [expanded, setExpanded] = useState(false);
   const [retryAt, setRetryAt] = useState<number>();
   const [clock, setClock] = useState(Date.now());
   const lastContact = useRef<number | undefined>(undefined);
   const retryNow = useRef<() => void>(() => {});
   const fitCurrent = useRef<() => void>(() => {});
   const currentFontSize = useRef(fontSize);
-  const pasteResult = useRef<InputResult | undefined>(undefined);
-  const pasting = useRef(false);
-  const lastPaste = useRef<{ text: string; result: InputResult } | undefined>(undefined);
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const credential = useRef<DeviceCredential | undefined>(undefined);
@@ -66,16 +58,6 @@ export function App() {
   const session = useRef<ClientSession | undefined>(undefined);
   const closed = useRef<((code: number) => void) | undefined>(undefined);
   const input = useRef<(data: string) => InputResult>(() => 'not-sent');
-  function currentDraft() {
-    let value = draftMemory.current.get(display.current.id);
-    if (!value) { value = { text: '', feedback: '' }; draftMemory.current.set(display.current.id, value); }
-    return value;
-  }
-  function setDraft(value: string | ((text: string) => string)) {
-    const memory = currentDraft(); memory.text = typeof value === 'function' ? value(memory.text) : value;
-    setDraftState(memory.text);
-  }
-  function setPasteFeedback(value: string) { currentDraft().feedback = value; setPasteFeedbackState(value); }
   function finishOperation(id?: string) {
     if (id && pendingOperation.current?.id !== id) return;
     clearTimeout(operationTimeout.current); pendingOperation.current = undefined; setOperation(undefined);
@@ -175,7 +157,7 @@ export function App() {
     let retry: ReturnType<typeof setTimeout> | undefined;
     let unsubscribe: (() => void) | undefined;
     const term = new Terminal({ cursorBlink: true, fontSize: currentFontSize.current, scrollback: 2000, disableStdin: true,
-      theme: { background: '#11151b', foreground: '#e5eaf0', cursor: '#a5dcc9', selectionBackground: '#354e59' },
+      theme: { background: '#0f141b', foreground: '#e6edf3', cursor: '#7ee2b8', selectionBackground: '#26433a' },
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host.current); terminal.current = term;
     const send = (message: unknown) => session.current?.send(message) ?? false;
@@ -197,10 +179,7 @@ export function App() {
     };
     fitCurrent.current = fitTerminal;
     const resize = new ResizeObserver(fitTerminal); resize.observe(host.current);
-    const dataListener = term.onData(data => {
-      const result = input.current(data);
-      if (pasting.current) pasteResult.current = result;
-    });
+    const dataListener = term.onData(data => { input.current(data); });
     const disconnectInput = () => { ready = false; term.options.disableStdin = true; };
     fleetRequest.current = request => {
       if (!ready || pendingOperation.current || session.current?.socket.readyState !== WebSocket.OPEN) return;
@@ -221,9 +200,8 @@ export function App() {
     const dropCredential = () => {
       reconnectAllowed = false; credential.current = undefined;
       void forgetCredential().catch(() => {}); setPending(undefined); setPaired(false);
-      setDraft(''); setPasteFeedback(''); lastPaste.current = undefined;
       setProject(''); setPid(undefined); lastContact.current = undefined; setRetryAt(undefined);
-      draftMemory.current.clear(); seen.current.clear(); display.current = { id: '', viewId: '' };
+      seen.current.clear(); display.current = { id: '', viewId: '' };
       setFleet(undefined); setActiveId(''); setShowCreate(false); setWatchedWorker(undefined); setWorkerOutput(undefined); finishOperation();
     };
     function attach(connection: ClientSession) {
@@ -236,9 +214,7 @@ export function App() {
           const focusSelectedTab = pending?.type === 'instance-select';
           if (pending && (pending.type === 'instance-select' || pending.type === 'instance-create') && message.requestId !== pending.id) return;
           disconnectInput();
-          currentDraft().lastPaste = lastPaste.current;
           const target = { id: message.instanceId, viewId: message.viewId }; display.current = target;
-          const memory = currentDraft(); setDraftState(memory.text); setPasteFeedbackState(memory.feedback); lastPaste.current = memory.lastPaste;
           setActiveId(target.id); setFleet(message.fleet); seen.current.set(target.id, Date.now());
           setWatchedWorker(undefined); setWorkerOutput(undefined);
           if (pending?.type === 'instance-create') setShowCreate(false);
@@ -251,6 +227,12 @@ export function App() {
             ready = true; attempt = 0; lastPong = Date.now(); setRetryAt(undefined);
             term.options.disableStdin = processExited; setStatus(processExited ? 'Exited' : 'Connected'); fitTerminal();
             if (focusSelectedTab) document.getElementById(`tab-${target.id}`)?.focus();
+            else {
+              // Startup and reconnect land the cursor in the terminal, but never steal it from a form field mid-entry.
+              const active = document.activeElement;
+              const inFormControl = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement;
+              if (!inFormControl) term.focus();
+            }
           });
         } else if (message.type === 'output') {
           if (message.instanceId === display.current.id && message.viewId === display.current.viewId) term.write(message.data);
@@ -267,8 +249,6 @@ export function App() {
             seen.current.set(active.id, active.lastActivity ?? Date.now());
             if (ready && active.state !== 'running') { processExited = true; term.options.disableStdin = true; setExitCode(active.exit?.exitCode); setStatus(active.state === 'stopping' ? 'Stopping' : 'Exited'); }
           }
-          const ids = new Set(message.fleet.instances.map((instance: any) => instance.id));
-          for (const id of draftMemory.current.keys()) if (!ids.has(id)) draftMemory.current.delete(id);
         } else if (message.type === 'fleet-result') finishOperation(message.requestId);
         else if (message.type === 'fleet-error') {
           setError(message.message);
@@ -362,24 +342,6 @@ export function App() {
   const activeInstance = fleet?.instances.find(instance => instance.id === activeId);
   const chosenProject = fleet?.projects.find(project => project.id === newProject);
   const sharesCheckout = fleet?.instances.some(instance => instance.cwd === chosenProject?.cwd && instance.state !== 'exited') ?? false;
-  const key = (data: string) => { if (input.current(data) === 'queued') terminal.current?.focus(); };
-  const submitDraft = (event: FormEvent) => {
-    event.preventDefault(); if (!connected || !draft) return;
-    if (new TextEncoder().encode(draft).byteLength > 64 * 1024 - 32) { setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.'); return; }
-    if (lastPaste.current?.text === draft && ['queued', 'partial'].includes(lastPaste.current.result)
-      && !window.confirm('This draft was already attempted. Delivery may have occurred. Inspect the terminal first. Paste it again?')) return;
-    setError(''); pasteResult.current = undefined; pasting.current = true;
-    try { terminal.current?.paste(draft); }
-    catch { pasteResult.current = 'partial'; setError('Paste delivery is uncertain. Inspect the terminal before retrying.'); }
-    finally { pasting.current = false; }
-    // xterm paste synchronously emits onData; TypeScript cannot see that callback write.
-    const result = (pasteResult.current as InputResult | undefined) ?? 'not-sent';
-    lastPaste.current = { text: draft, result }; currentDraft().lastPaste = lastPaste.current;
-    setPasteFeedback(result === 'queued'
-      ? 'Paste queued locally, not confirmed by Haze. Draft retained. Inspect the terminal, then tap Enter to submit.'
-      : 'Paste was not confirmed. Draft retained. Inspect the terminal before retrying; no automatic replay.');
-    if (result === 'queued') terminal.current?.focus();
-  };
   if (paired === null) return <main className="pair-screen"><p role="status">Initializing encrypted connection…</p></main>;
   if (!paired) return <main className="pair-screen"><section className="pair-card">
     <div className="wordmark">haze<span> / remote</span></div>
@@ -405,9 +367,13 @@ export function App() {
     <p className="fine-print">Terminal transport is encrypted. The HTTP-delivered page can still be modified by an active network attacker. Pair only on trusted networks. Approval grants your computer’s permissions.</p>
   </section></main>;
   return <main className="workspace">
-    <header><div className="wordmark">haze<span> / remote</span></div><div className={`status ${connected ? 'live' : ''}`} role="status">{status}{status === 'Exited' ? ` (${exitCode ?? '?'})` : ''}</div><button onClick={unpair}>Unpair</button></header>
+    <header className="app-header">
+      <div className="wordmark">haze<span> / remote</span></div>
+      <div className={`status ${connected ? 'live' : ''}`} role="status">{status}{status === 'Exited' ? ` (${exitCode ?? '?'})` : ''}</div>
+      <div className="connection-meta">{location.host} · {lastContact.current ? `Last authenticated contact ${Math.max(0, Math.floor((clock - lastContact.current) / 1000))}s ago` : 'Waiting for authenticated contact'}</div>
+      <button onClick={unpair}>Unpair</button>
+    </header>
     <div className="session-meta"><span title={project}>{project || 'Authenticating approved device…'}</span><span>{pid ? `PID ${pid}` : 'PTY'}</span></div>
-    <div className="connection-meta">Host: {location.host} · {lastContact.current ? `Last authenticated contact ${Math.max(0, Math.floor((clock - lastContact.current) / 1000))}s ago` : 'Waiting for authenticated contact'}</div>
     {status === 'Already connected' && <div className="notice">This device is connected in another tab. Close that tab first. <button onClick={() => setEpoch(e => e + 1)}>Reconnect</button></div>}
     {status === 'Reconnecting' && <div className="notice">Connection lost. Disconnecting the browser does not stop Haze. Check that the host is awake, haze-remote is running, and the network is reachable. {retryAt ? `Retry in ${Math.max(0, Math.ceil((retryAt - clock) / 1000))}s.` : 'Re-authenticating…'} <button onClick={() => retryNow.current()}>Retry now</button></div>}
     {status === 'Exited' && <div className="notice">Haze exited. Recent output is available until haze-remote stops.</div>}
@@ -432,18 +398,14 @@ export function App() {
     <div className={`fleet-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
     <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} selectedKey={watchedWorker} output={workerOutput} onSelect={selectWorker} /></div>
     <section id="fleet-terminal" className="terminal-pane" role="tabpanel" aria-labelledby={activeId ? `tab-${activeId}` : undefined}>
-    <div className="instance-actions"><span>{activeInstance?.name ?? 'Loading fleet…'} · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running processes</span>{activeInstance?.state === 'exited' ? <button disabled={!canOperate || !!operation || (fleet?.instances.length ?? 0) < 2} onClick={() => command({ type: 'instance-close', instanceId: activeId })}>Close tab</button> : <button disabled={!canOperate || !!operation || activeInstance?.state !== 'running'} onClick={() => { if (window.confirm(`Stop ${activeInstance?.name}? Its Haze process will terminate. Other instances keep running. Recent output remains until you close this tab.`)) command({ type: 'instance-stop', instanceId: activeId }); }}>Stop instance</button>}</div>
+    <div className="terminal-toolbar">
+      <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
+      <span className="terminal-title">{activeInstance?.name ?? 'Loading fleet…'}<small> · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running</small></span>
+      <div className="toolbar-group" aria-label="Terminal readability"><button disabled={fontSize <= 12} onClick={() => setFontSize(size => Math.max(12, size - 2))} aria-label="Smaller terminal text">A−</button><span className="font-size">{fontSize}px</span><button disabled={fontSize >= 24} onClick={() => setFontSize(size => Math.min(24, size + 2))} aria-label="Larger terminal text">A+</button><button onClick={() => terminal.current?.scrollToBottom()}>Latest output</button></div>
+      {activeInstance?.state === 'exited' ? <button disabled={!canOperate || !!operation || (fleet?.instances.length ?? 0) < 2} onClick={() => command({ type: 'instance-close', instanceId: activeId })}>Close tab</button> : <button className="danger" disabled={!canOperate || !!operation || activeInstance?.state !== 'running'} onClick={() => { if (window.confirm(`Stop ${activeInstance?.name}? Its Haze process will terminate. Other instances keep running. Recent output remains until you close this tab.`)) command({ type: 'instance-stop', instanceId: activeId }); }}>Stop instance</button>}
+    </div>
     {status === 'Switching' && <p className="notice">Restoring instance screen. Input is disabled until its snapshot is ready.</p>}
-    <div className="terminal-tools" aria-label="Terminal readability"><button disabled={fontSize <= 12} onClick={() => setFontSize(size => Math.max(12, size - 2))} aria-label="Smaller terminal text">A−</button><span>{fontSize}px</span><button disabled={fontSize >= 24} onClick={() => setFontSize(size => Math.min(24, size + 2))} aria-label="Larger terminal text">A+</button><button onClick={() => terminal.current?.scrollToBottom()}>Latest output</button></div>
-    <div className="terminal" ref={host} aria-label="Haze terminal" />
-    <nav className="keys" aria-label="Terminal keys"><button disabled={!connected} onClick={() => terminal.current?.focus()}>Keyboard</button>
-      {([['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['Enter', '\r'], ['Ctrl+C', '\x03']] as const).map(([label, data]) => <button key={label} disabled={!connected} aria-label={label} onClick={() => key(data)}>{label}</button>)}
-    </nav>
-    <div className="draft-tools"><label>Quick instruction <select aria-label="Quick instruction" value="" onChange={event => {
-      if (event.target.value) { setDraft(text => text ? `${text}\n\n${event.target.value}` : event.target.value); setPasteFeedback('Instruction added to draft only. Edit it, then Paste and Enter when ready.'); }
-    }}><option value="">Add to draft…</option><option value="Summarize your progress, remaining work, and any blockers.">Check progress</option><option value="Run the relevant tests and report any failures before continuing.">Verify the work</option><option value="Stop making edits and explain the current approach and risks.">Review the approach</option><option value="/help">Haze help (/help)</option></select></label><button onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? 'Compact composer' : 'Expand composer'}</button><button disabled={!draft} onClick={() => { setDraft(''); lastPaste.current = undefined; currentDraft().lastPaste = undefined; setPasteFeedback('Draft cleared.'); }}>Clear draft</button></div>
-    <form className={`composer ${expanded ? 'expanded' : ''}`} onSubmit={submitDraft}><textarea aria-label="Message to Haze" placeholder="Write a prompt, paste it, then tap Enter to submit…" value={draft} disabled={status === 'Switching'} onChange={e => { setDraft(e.target.value); setPasteFeedback(''); }} rows={expanded ? 5 : 2} autoCapitalize="none" spellCheck={false} /><button className="primary" disabled={!connected || !draft} title="Paste without submitting" type="submit">Paste</button></form>
-    <div className="composer-feedback" aria-live="polite">{pasteFeedback || 'Draft stays in this page only. Paste does not submit; use Enter when ready.'}</div>
+    <div className="terminal" ref={host} aria-label="Haze terminal" title="Tap the terminal to type; use your device's paste to paste text into Haze." />
     {(() => { const worker = activeInstance?.subagents?.workers?.find(item => item.key === watchedWorker); return worker ? <SubagentOverlay worker={worker} output={workerOutput} onClose={() => selectWorker(undefined)} /> : null; })()}
     <footer>Encrypted terminal transport · Input never queued offline · Haze remains on your computer</footer>
     </section></div>

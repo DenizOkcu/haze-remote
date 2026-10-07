@@ -74,22 +74,20 @@ These are handled by haze-remote's own stdin, **not** the bridged Haze PTY. No H
 
 ### Using the terminal
 
-Tap **Keyboard** for direct input, or compose a prompt, tap **Paste**, then **Enter**. Pasting deliberately does not submit automatically, so multiline prompts follow Haze's paste behavior. Touch keys provide Escape, Tab, arrows, Enter, and Ctrl+C; physical keyboards work too. Browser Ctrl+C follows Haze's interrupt semantics, not the local server shutdown command.
+Tap the terminal and type — the cursor is placed there automatically at startup and after reconnects. Your device's normal paste and on-screen keyboard work directly in the terminal; press **Enter** to submit. Input is delivered live over the encrypted channel — nothing is queued or replayed automatically. Ctrl+C follows Haze's interrupt semantics, not the local server shutdown command.
 
 The computer must stay awake and haze-remote must remain running. Tablet sleep, closed tabs, or lost connectivity do not stop Haze. Reconnect restores the same PID and recent screen/history. Input is never queued offline. Haze exiting leaves its final screen available until the server stops.
 
 ### Terminal controls
 
-- **Draft recovery:** Paste retains your draft, including on failed/partial sends. “Queued locally” is not confirmation that Haze received or processed it. Inspect the terminal before Enter or retry; repeating the same attempted draft asks for confirmation. Drafts survive in-page reconnect but are not saved across reload and are cleared when access ends. **Clear draft** removes the current draft.
-- **Connection recovery:** host address, last authenticated contact, retry countdown, and **Retry now** help diagnose reachability. They do not infer whether the agent is working or finished. Another active tab still cannot be taken over automatically.
-- **Readability:** A−/A+ changes terminal text from 12–24px; only this non-sensitive preference is stored locally. **Latest output** scrolls to the bottom, **Expand composer** gives more typing space, and the layout follows the browser's visible viewport.
-- **Quick instructions:** progress, verification, approach review, and `/help` append editable text to your existing draft. Nothing is pasted or submitted automatically. Ctrl+C remains Haze's terminal interrupt, not a guaranteed pause or process-tree kill.
+- **Readability:** A−/A+ changes terminal text from 12–24px; only this non-sensitive preference is stored locally. **Latest output** scrolls to the bottom, and the layout follows the browser's visible viewport.
+- **Honest input:** typed text and pastes are delivered straight to the selected Haze terminal. Local enqueue is not confirmation the agent processed it; failed or uncertain sends are never retried automatically.
 
 ### Fleet of Haze instances
 
-- **Tabs are real Haze processes**, not browser tabs or copies of one terminal. **New instance** lets you name an instance and choose a locally approved project. Each has its own PID, terminal screen/history, draft, and paste feedback. Left/Right/Home/End navigate instance tabs with a physical keyboard.
+- **Tabs are real Haze processes**, not browser tabs or copies of one terminal. **New instance** lets you name an instance and choose a locally approved project. Each has its own PID and terminal screen/history. Left/Right/Home/End navigate instance tabs with a physical keyboard.
 - **Stop instance** confirms and terminates only the selected Haze process; other instances continue. Recent output stays visible. **Close tab** removes an exited instance, not project files; at least one tab remains.
-- Reconnect and reload restore the same server-owned fleet and last selected instance without spawning duplicates. Drafts are per-instance and survive switching/in-page reconnect, but not reload. Running/stopping/exited labels report process lifetime—not whether an agent is thinking or a task finished. Background output is marked on unselected tabs.
+- Reconnect and reload restore the same server-owned fleet and last selected instance without spawning duplicates. Running/stopping/exited labels report process lifetime—not whether an agent is thinking or a task finished. Background output is marked on unselected tabs.
 - Up to **8 tabs**, including exited instances, and **16 locally approved projects** are supported. Close exited tabs to free slots. Creation request IDs are remembered to prevent duplicate launches; after 256 successful/pending launch IDs in one server lifetime, new launches are refused rather than forgetting old IDs.
 - Additional tabs launch fresh Haze sessions, not the initial `--continue`/`--resume` arguments. There is no import/attach to Haze processes started outside this server.
 - Instances in one checkout **share files**. Starting another in an occupied checkout requires an explicit **Allow shared checkout** acknowledgement. For parallel writers, create Git worktrees yourself and approve them at local startup:
