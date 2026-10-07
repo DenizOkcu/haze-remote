@@ -15,19 +15,19 @@ const wait = async check => {
 };
 try {
   const result = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', dir], { encoding: 'utf8' }));
-  const packed = Array.isArray(result) ? result[0] : result['haze-remote'];
+  const packed = Array.isArray(result) ? result[0] : result['@denizokcu/haze-remote'];
   for (const path of ['dist/client/index.html', 'dist/server/cli.js', 'dist/server/fleet.js', 'dist/server/haze-observer/preload.js', 'dist/server/haze-observer/loader.js', 'dist/server/haze-observer/runtime.js', 'dist/server/haze-observer/transform.js', 'dist/server/haze-observer/host.js', 'dist/shared/fleet.js', 'dist/shared/observer.js', 'dist/shared/session.js', 'scripts/prepare-pty.mjs']) assert.ok(packed.files.some(f => f.path === path));
   assert.ok(!packed.files.some(f => /^(client|server|shared|tests|\.haze)\//.test(f.path)));
   assert.ok(!packed.files.some(f => f.path === 'dist/server/git-review.js' || f.path === 'dist/shared/review.js' || f.path === 'dist/server/subagents.js'), 'Removed review/session-reader code must not survive in build artifacts');
-  await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, allowScripts: { 'node-pty@1.1.0': true, 'haze-remote@0.1.0': true } }));
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, allowScripts: { 'node-pty@1.1.0': true, '@denizokcu/haze-remote@0.0.1': true } }));
   execFileSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', join(dir, packed.filename)], { cwd: dir, stdio: 'pipe' });
   if (Number(execFileSync('npm', ['--version'], { encoding: 'utf8' }).split('.')[0]) >= 12) {
-    execFileSync('npm', ['install-scripts', 'approve', 'haze-remote', 'node-pty'], { cwd: dir, stdio: 'pipe' });
-    execFileSync('npm', ['rebuild', 'node-pty', 'haze-remote'], { cwd: dir, stdio: 'pipe' });
+    execFileSync('npm', ['install-scripts', 'approve', '@denizokcu/haze-remote', 'node-pty'], { cwd: dir, stdio: 'pipe' });
+    execFileSync('npm', ['rebuild', 'node-pty', '@denizokcu/haze-remote'], { cwd: dir, stdio: 'pipe' });
   }
   if (process.platform === 'darwin') assert.ok((await stat(join(dir, `node_modules/node-pty/prebuilds/darwin-${process.arch}/spawn-helper`))).mode & 0o111);
   const bin = join(dir, 'node_modules/.bin/haze-remote');
-  assert.equal(execFileSync(bin, ['--version'], { cwd: dir, encoding: 'utf8' }).trim(), 'haze-remote 0.1.0');
+  assert.equal(execFileSync(bin, ['--version'], { cwd: dir, encoding: 'utf8' }).trim(), '@denizokcu/haze-remote 0.0.1');
   assert.match(execFileSync(bin, ['--help'], { cwd: dir, encoding: 'utf8' }), /--project/);
   await mkdir(join(dir, 'project'));
   const fixture = join(dir, 'agent.mjs');

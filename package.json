@@ -1,6 +1,6 @@
 {
-  "name": "haze-remote",
-  "version": "0.1.0",
+  "name": "@denizokcu/haze-remote",
+  "version": "0.0.1",
   "description": "Control an installed Haze terminal agent from a paired browser",
   "type": "module",
   "license": "MIT",
@@ -27,13 +27,14 @@
     "build": "npm run build:server && vite build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json",
     "start": "node dist/server/cli.js",
-    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts tests/skills.test.ts",
+    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts tests/skills.test.ts tests/configuration.test.ts",
     "test:browser": "playwright test",
     "test:haze": "tsx tests/haze-smoke.ts",
     "test:package": "npm run build && node tests/package-smoke.mjs",
     "prepack": "npm run typecheck && npm run build"
   },
   "dependencies": {
+    "@denizokcu/haze": "1.5.1",
     "@serenity-kit/opaque": "1.1.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-serialize": "0.14.0",

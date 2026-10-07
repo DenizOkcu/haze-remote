@@ -10,6 +10,9 @@ import { FleetManager } from './fleet.js';
 import { isFleetRequest, type FleetProject } from '../shared/fleet.js';
 import { isSkillRequest } from '../shared/skills.js';
 import { SkillManager } from './skills.js';
+import { isManagementRequest } from '../shared/configuration.js';
+import { ConfigurationManager } from './configuration.js';
+import { SessionCatalog } from './sessions.js';
 
 export interface RemoteOptions {
   host: string; port: number; cwd: string; executable: string; args: string[]; assets: string;
@@ -49,6 +52,8 @@ export async function startRemote(options: RemoteOptions) {
   let selection: { id: string; viewId: string; ws: WebSocket; ready: boolean } | undefined;
   const creations = new Map<string, Promise<string>>();
   const skills = new SkillManager(projects, options.env?.HOME);
+  const configuration = new ConfigurationManager(options.env?.HOME);
+  const sessions = new SessionCatalog(projects, options.env?.HOME);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false });
   const access = new AccessController({ onPin: options.onPin, onPending: options.onPending,
     onAuthenticated(ws) {
@@ -81,6 +86,19 @@ export async function startRemote(options: RemoteOptions) {
         });
         return;
       }
+      if (typeof message?.type === 'string' && /^(configuration-|provider-|settings-|sessions-)/.test(message.type)) {
+        if (!isManagementRequest(message)) { send(ws, { type: 'management-error', requestId: message.requestId, message: 'Invalid configuration request.' }); return; }
+        void (message.type === 'sessions-list'
+          ? sessions.list(projects.find(project => project.id === message.projectId)!).catch(() => ({ sessions: [], warnings: ['Session history is unavailable.'], canFork: false }))
+            .then(result => { if (access.isActive(ws)) send(ws, { type: 'sessions-result', requestId: message.requestId, ...result }); })
+          : configuration.execute(message, () => access.isActive(ws))
+            .then(configurationResult => { if (access.isActive(ws)) send(ws, { type: 'configuration-result', requestId: message.requestId, configuration: configurationResult }); })
+            .catch(error => {
+              const detail = error instanceof Error && !('code' in error) ? error.message : 'Configuration operation failed. Check the settings file and try again.';
+              if (access.isActive(ws)) send(ws, { type: 'management-error', requestId: message.requestId, message: detail.slice(0, 240) });
+            }));
+        return;
+      }
       if (!isFleetRequest(message)) throw new Error('Invalid fleet message');
       void (async () => {
         try {
@@ -91,7 +109,8 @@ export async function startRemote(options: RemoteOptions) {
               // Never evict pending/successful IDs: an old retry must not spawn
               // another process. Failed launches have no side effect to dedupe.
               if (creations.size >= 256) throw new Error('Launch request history is full. Restart haze-remote before starting more instances.');
-              creation = fleet.create(message.name.trim(), message.projectId, message.allowShared, false, () => access.isActive(ws)).then(instance => instance.id).catch(error => {
+              creation = fleet.create(message.name.trim(), message.projectId, message.allowShared, false, () => access.isActive(ws),
+                message.launch?.mode === 'resume' ? { mode: 'resume', sessionId: message.launch.sessionId } : { mode: 'fresh' }).then(instance => instance.id).catch(error => {
                 creations.delete(message.requestId); throw error;
               });
               creations.set(message.requestId, creation);

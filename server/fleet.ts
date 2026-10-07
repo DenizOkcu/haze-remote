@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises';
 import * as pty from 'node-pty';
 import headless from '@xterm/headless';
 import serialize from '@xterm/addon-serialize';
-import { MAX_INSTANCES, MAX_SUBAGENTS, type AgentInstance, type FleetProject, type FleetState, type WorkerState } from '../shared/fleet.js';
+import { MAX_INSTANCES, MAX_SUBAGENTS, validSessionId, type AgentInstance, type FleetProject, type FleetState, type WorkerState } from '../shared/fleet.js';
 import { MAX_WORKER_OUTPUT_BYTES, type ObserverMessage, type WorkerOutput } from '../shared/observer.js';
 import { hostObserver, observerEnvironment, type ObserverHost } from './haze-observer/host.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -117,7 +117,8 @@ export class FleetManager {
       this.publish();
     }
   }
-  async create(name: string, projectId: string, allowShared: boolean, initial = false, authorized: () => boolean = () => true) {
+  async create(name: string, projectId: string, allowShared: boolean, initial = false, authorized: () => boolean = () => true, launch: { mode: 'fresh' | 'resume' | 'fork'; sessionId?: string } = { mode: 'fresh' }) {
+    if (launch.mode !== 'fresh' && !validSessionId(launch.sessionId)) throw new Error('Invalid session id.');
     if (this.disposed || this.runs.size >= MAX_INSTANCES) throw new Error('Fleet limit reached. Close an exited tab before creating another instance.');
     const project = this.options.projects.find(project => project.id === projectId);
     if (!project || await realpath(project.cwd) !== project.cwd) throw new Error('The locally approved project directory is unavailable or changed.');
@@ -154,7 +155,13 @@ export class FleetManager {
         // NODE_OPTIONS reaches both direct-node and shebang executables.
         env.NODE_OPTIONS = `${env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ` : ''}--import ${JSON.stringify(preload)}`;
       }
-      child = pty.spawn(this.options.executable, initial ? this.options.args : this.options.newArgs, {
+      const args = initial ? this.options.args : [...this.options.newArgs];
+      if (!initial && launch.mode !== 'fresh') {
+        // Resume reattaches to the durable session file. Fork launches were
+        // pre-created on disk by the server with a fresh id, so they also resume.
+        args.push('--resume', launch.sessionId!);
+      }
+      child = pty.spawn(this.options.executable, args, {
         name: 'xterm-256color', cols: term.cols, rows: term.rows, cwd: project.cwd, env,
       });
       run.child = child;

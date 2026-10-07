@@ -99,6 +99,12 @@ haze-remote --lan --cwd /path/to/project --project /path/to/other-worktree
 
 Project selection is not a sandbox: Haze retains your OS-user authority. There is no automatic worktree creation or merge/delete operation.
 
+### Providers, Settings, and Sessions
+
+- **Providers** edits `~/.haze/settings.json` over the approved encrypted channel: add or edit OpenAI-compatible endpoints and models (with optional context/output token limits), rotate or clear API keys, choose the default provider/model, and remove providers. Keys are write-only — they are never sent back to the browser, and a blank field means "keep the stored key". OAuth sign-in (ChatGPT Codex) uses the native `/provider` picker via the shortcut button. Changes take effect in fresh Haze instances.
+- **Settings** exposes the safe subset of Haze preferences (theme, reasoning effort, steering/compaction profile, model-retry pool, context-window fallbacks, escalation model, tips, subagent worker model/default profile). Every field supports "use default" to unset the override; unrelated configuration and unknown fields are preserved.
+- The sidebar has **Sessions** and **Subagents** tabs. Sessions lists saved conversations for the selected workspace (id, time, size — summaries only, never content) from Haze's per-cwd session store and resumes one into a new instance tab via a validated `--resume <id>` launch; forking is prepared on the server and performed through Haze's own session tooling.
+
 ### Skills tab
 
 - **Skills** lists all global (`~/.haze/skills`) and locally approved project (`.haze/skills`) workflows, including disabled and same-named skills. Search by name/description or filter by scope. Project skills take precedence in Haze.
@@ -123,12 +129,12 @@ Git review is removed. Managed worktrees, multi-host routing, persistent fleet o
 
 ```sh
 npm pack                       # runs typecheck and build
-npm install -g ./haze-remote-0.1.0.tgz
+npm install -g ./denizokcu-haze-remote-0.0.1.tgz
 cd /path/to/your/project
 haze-remote --lan
 ```
 
-This implementation has not published the package to npm. If lifecycle scripts are restricted, approve the trusted node-pty/haze-remote scripts. For npm 12 **local** installations, use `npm install-scripts approve node-pty haze-remote`, then `npm rebuild node-pty haze-remote`. Checkout approvals are pinned. The reviewed `scripts/prepare-pty.mjs` repairs a missing execute bit on node-pty 1.1.0's macOS prebuilt helper; it never touches Haze or user project files.
+This implementation has not published the package to npm. If lifecycle scripts are restricted, approve the trusted node-pty/haze-remote scripts. For npm 12 **local** installations, use `npm install-scripts approve @denizokcu/haze-remote node-pty`, then `npm rebuild node-pty @denizokcu/haze-remote`. Checkout approvals are pinned. The reviewed `scripts/prepare-pty.mjs` repairs a missing execute bit on node-pty 1.1.0's macOS prebuilt helper; it never touches Haze or user project files.
 
 ```text
 haze-remote [options] [-- <Haze arguments>]

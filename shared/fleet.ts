@@ -25,7 +25,7 @@ export type AgentInstance = {
 };
 export type FleetState = { instances: AgentInstance[]; projects: FleetProject[]; limit: number };
 export type FleetRequest =
-  | { type: 'instance-create'; requestId: string; name: string; projectId: string; allowShared: boolean }
+  | { type: 'instance-create'; requestId: string; name: string; projectId: string; allowShared: boolean; launch?: { mode: 'resume'; sessionId: string } }
   | { type: 'instance-select'; requestId: string; instanceId: string }
   | { type: 'instance-stop' | 'instance-close'; requestId: string; instanceId: string }
   | { type: 'worker-watch' | 'worker-unwatch'; requestId: string; instanceId: string; workerKey?: string };
@@ -35,7 +35,8 @@ const workerKey = (value: unknown): value is string => typeof value === 'string'
 export function isFleetRequest(message: any): message is FleetRequest {
   if (!message || !id(message.requestId)) return false;
   if (message.type === 'instance-create') return id(message.projectId) && typeof message.name === 'string'
-    && message.name.trim().length > 0 && message.name.length <= 80 && !/[\x00-\x1f\x7f]/.test(message.name) && typeof message.allowShared === 'boolean';
+    && message.name.trim().length > 0 && message.name.length <= 80 && !/[\x00-\x1f\x7f]/.test(message.name) && typeof message.allowShared === 'boolean'
+    && (message.launch === undefined || (message.launch.mode === 'resume' && validSessionId(message.launch.sessionId)));
   if (!id(message.instanceId)) return false;
   if (message.type === 'worker-watch') return workerKey(message.workerKey);
   if (message.type === 'worker-unwatch') return true;

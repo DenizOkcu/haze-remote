@@ -1,0 +1,76 @@
+.configuration-panel {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  scrollbar-color: var(--border-strong) transparent;
+}
+.configuration-panel[hidden] { display: none; }
+.configuration-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.configuration-header, .configuration-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.configuration-header h1 { margin: 0 0 10px; }
+.configuration-header p { max-width: 760px; margin-bottom: 0; }
+.configuration-header > button { flex-shrink: 0; }
+.configuration-layout { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 18px; }
+.configuration-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+.configuration-card h2 { margin: 0 0 14px; font-size: 18px; }
+.configuration-card aside, .configuration-card form { min-width: 0; }
+.configuration-card label { display: grid; gap: 7px; min-width: 0; margin-bottom: 14px; }
+.configuration-card input, .configuration-card select { width: 100%; min-width: 0; min-height: 42px; }
+.configuration-card label small { font-weight: 400; color: var(--text-muted); line-height: 1.5; }
+.configuration-card fieldset { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); margin: 0 0 18px; padding: 16px; }
+.configuration-card fieldset:disabled { opacity: .65; }
+.configuration-card legend { color: var(--text-muted); font-size: 13px; font-weight: 650; padding: 0 6px; }
+.configuration-card .configuration-check { display: flex; align-items: center; gap: 10px; line-height: 1.5; }
+.configuration-check input { width: 18px; height: 18px; min-height: 18px; flex-shrink: 0; accent-color: var(--accent); }
+.configuration-card .fine-print { margin-bottom: 14px; }
+.configuration-list { padding: 0; margin: 0 0 20px; list-style: none; display: grid; gap: 8px; }
+.configuration-list button { width: 100%; text-align: left; padding: 12px; overflow-wrap: anywhere; }
+.configuration-list button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-border); }
+.configuration-list strong, .configuration-list small { display: block; }
+.configuration-list small { color: var(--text-muted); font-weight: 400; margin-top: 6px; line-height: 1.5; }
+.configuration-layout aside > button { width: 100%; margin-bottom: 20px; }
+.configuration-heading h2 { margin: 0; }
+.configuration-heading span { color: var(--text-muted); font-size: 12px; }
+.configuration-model { display: grid; grid-template-columns: minmax(120px, 2fr) minmax(90px, 1fr) minmax(90px, 1fr) auto; gap: 10px; align-items: end; padding: 12px 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.configuration-model label { margin: 0; }
+.configuration-model button { min-height: 42px; }
+.configuration-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.configuration-default { margin-top: 18px; }
+.configuration-default fieldset { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; margin-bottom: 0; }
+.configuration-default label { flex: 1 1 220px; margin-bottom: 0; }
+.configuration-default button { min-height: 42px; }
+.configuration-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
+.configuration-success { padding: 10px 16px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: var(--radius); }
+.configuration-panel .error { background: var(--danger-soft); border: 1px solid var(--danger-border); border-radius: var(--radius); }
+@media (max-width: 1000px) {
+  .configuration-model { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .configuration-panel { padding: 16px; }
+  .configuration-header { align-items: flex-start; flex-direction: column; }
+  .configuration-layout, .configuration-settings { grid-template-columns: minmax(0, 1fr); }
+  .configuration-card { padding: 16px; }
+  .configuration-header h1 { font-size: 24px; }
+  .configuration-actions > button { flex: 1 1 160px; min-height: 44px; }
+}
+@media (max-width: 380px) {
+  .configuration-panel { padding: 10px; }
+  .configuration-card { padding: 12px; }
+  .configuration-model { grid-template-columns: minmax(0, 1fr); }
+}

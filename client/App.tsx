@@ -9,7 +9,10 @@ import { SubagentSidebar, SubagentOverlay } from './SubagentSidebar';
 import type { FleetState, FleetRequest } from '../shared/fleet.js';
 import type { WorkerOutput } from '../shared/observer.js';
 import type { SkillResponse } from '../shared/skills.js';
+import type { ManagementCommand, ManagementResponse, SessionInfo } from '../shared/configuration.js';
 import { SkillsTab, type SkillCommand } from './SkillsTab';
+import { ConfigurationTabs } from './ConfigurationTabs';
+import { SessionsSidebar, SidebarTabs, type SidebarTab } from './SessionsSidebar';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
 type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
@@ -29,14 +32,17 @@ export function App() {
   const [exitCode, setExitCode] = useState<number>();
   const [epoch, setEpoch] = useState(0);
   const [fleet, setFleet] = useState<FleetState>();
-  const [view, setView] = useState<'terminal' | 'skills'>('terminal');
+  const [view, setView] = useState<'terminal' | 'skills' | 'providers' | 'settings'>('terminal');
   const viewRef = useRef(view); viewRef.current = view;
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('subagents');
   const skillPending = useRef(new Map<string, { resolve: (value: SkillResponse & { type: 'skills-result' }) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>());
+  const managementPending = useRef(new Map<string, { resolve: (value: ManagementResponse) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>());
   const [activeId, setActiveId] = useState('');
   const [operation, setOperation] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newProject, setNewProject] = useState('');
+  const [resumeSession, setResumeSession] = useState<string>();
   const [allowShared, setAllowShared] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [watchedWorker, setWatchedWorker] = useState<string>();
@@ -63,6 +69,20 @@ export function App() {
   const session = useRef<ClientSession | undefined>(undefined);
   const closed = useRef<((code: number) => void) | undefined>(undefined);
   const input = useRef<(data: string) => InputResult>(() => 'not-sent');
+  const requestManagement = useCallback((command: ManagementCommand) => new Promise<ManagementResponse>((resolve, reject) => {
+    const id = requestId();
+    const timer = setTimeout(() => {
+      managementPending.current.delete(id);
+      reject(new Error('Operation was not confirmed. Reload or retry after reconnecting; nothing is replayed automatically.'));
+    }, 12_000);
+    managementPending.current.set(id, { resolve, reject, timer });
+    try {
+      if (!session.current?.send({ ...command, requestId: id })) throw new Error('Request not sent');
+    } catch {
+      clearTimeout(timer); managementPending.current.delete(id);
+      reject(new Error('Request was not sent. Reconnect and try again.'));
+    }
+  }), []);
   const requestSkill = useCallback((command: SkillCommand) => new Promise<SkillResponse & { type: 'skills-result' }>((resolve, reject) => {
     const id = requestId();
     const timer = setTimeout(() => {
@@ -83,6 +103,11 @@ export function App() {
       pending.reject(new Error('Connection lost. Reopen the skill to check whether a save completed; your draft is preserved.'));
     }
     skillPending.current.clear();
+    for (const pending of managementPending.current.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Connection lost. Check whether the change completed by reloading; your drafts are preserved.'));
+    }
+    managementPending.current.clear();
   }
   function finishOperation(id?: string) {
     if (id && pendingOperation.current?.id !== id) return;
@@ -240,6 +265,15 @@ export function App() {
           if (pending) {
             clearTimeout(pending.timer); skillPending.current.delete(message.requestId);
             if (message.type === 'skills-error') pending.reject(new Error(message.message));
+            else pending.resolve(message);
+          }
+          return;
+        }
+        if (message.type === 'configuration-result' || message.type === 'sessions-result' || message.type === 'management-error') {
+          const pending = managementPending.current.get(message.requestId);
+          if (pending) {
+            clearTimeout(pending.timer); managementPending.current.delete(message.requestId);
+            if (message.type === 'management-error') pending.reject(new Error(message.message));
             else pending.resolve(message);
           }
           return;
@@ -416,17 +450,28 @@ export function App() {
     <nav className="workspace-tabs" role="tablist" aria-label="Workspace sections" onKeyDown={event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      const next = event.key === 'Home' ? 'terminal' : event.key === 'End' ? 'skills' : view === 'terminal' ? 'skills' : 'terminal';
+      const order = ['terminal', 'skills', 'providers', 'settings'] as const;
+      const index = order.indexOf(view);
+      const next = event.key === 'Home' ? order[0] : event.key === 'End' ? order[order.length - 1]
+        : order[(index + (event.key === 'ArrowRight' ? 1 : -1) + order.length) % order.length];
       setView(next); document.getElementById(`${next}-tab`)?.focus();
     }}>
       <button role="tab" id="terminal-tab" aria-selected={view === 'terminal'} aria-controls="terminal-panel" tabIndex={view === 'terminal' ? 0 : -1} onClick={() => setView('terminal')}>Terminal</button>
       <button role="tab" id="skills-tab" aria-selected={view === 'skills'} aria-controls="skills-panel" tabIndex={view === 'skills' ? 0 : -1} onClick={() => setView('skills')}>Skills</button>
+      <button role="tab" id="providers-tab" aria-selected={view === 'providers'} aria-controls="providers-panel" tabIndex={view === 'providers' ? 0 : -1} onClick={() => setView('providers')}>Providers</button>
+      <button role="tab" id="settings-tab" aria-selected={view === 'settings'} aria-controls="settings-panel" tabIndex={view === 'settings' ? 0 : -1} onClick={() => setView('settings')}>Settings</button>
     </nav>
     <SkillsTab active={view === 'skills'} connected={canOperate} projectId={activeInstance?.projectId} request={requestSkill} onManage={() => {
       if (!connected || activeInstance?.state !== 'running') { setError('Select a running Haze instance in the Terminal tab to open /skills.'); return; }
       if (!window.confirm('Type /skills into the selected Haze terminal? Continue only when Haze is idle at an empty prompt. Review it and press Enter to open the picker.')) return;
       viewRef.current = 'terminal'; setView('terminal');
       input.current('/skills'); requestAnimationFrame(() => terminal.current?.focus());
+    }} />
+    <ConfigurationTabs view={view} connected={canOperate} request={requestManagement} onNativeProvider={() => {
+      if (!connected || activeInstance?.state !== 'running') { setError('Select a running Haze instance in the Terminal tab to open the native provider picker.'); return; }
+      if (!window.confirm('Type /provider into the selected Haze terminal? Continue only when Haze is idle at an empty prompt. Review it and press Enter to open the picker (needed for OAuth sign-in).')) return;
+      viewRef.current = 'terminal'; setView('terminal');
+      input.current('/provider'); requestAnimationFrame(() => terminal.current?.focus());
     }} />
     <div id="terminal-panel" role="tabpanel" aria-labelledby="terminal-tab" className="terminal-section" hidden={view !== 'terminal'}>
     <div className="fleet-navigation">
@@ -438,16 +483,24 @@ export function App() {
         document.getElementById(`tab-${target.id}`)?.focus();
       }} onClick={() => { if (instance.id !== activeId) command({ type: 'instance-select', instanceId: instance.id }); }}><strong>{instance.name}</strong><small>{instance.state}{instance.exit ? ` (${instance.exit.exitCode})` : ''}{instance.id !== activeId && (instance.lastActivity ?? 0) > (seen.current.get(instance.id) ?? instance.createdAt) ? ' · New output' : ''}</small></button>)}</nav>
       <button disabled={!canOperate || !!operation || !fleet || fleet.instances.length >= fleet.limit} onClick={() => { setNewName(`Haze ${(fleet?.instances.length ?? 0) + 1}`); setNewProject(activeInstance?.projectId ?? fleet?.projects[0]?.id ?? ''); setAllowShared(false); setShowCreate(true); }}>New instance</button>
-      <button aria-expanded={sidebarOpen} aria-controls="subagent-panel" onClick={() => setSidebarOpen(open => !open)}>Subagents</button>
+      <button aria-expanded={sidebarOpen} aria-controls="subagent-panel" onClick={() => setSidebarOpen(open => !open)}>Sidebar</button>
     </div>
-    {showCreate && <section className="new-instance" aria-label="Create Haze instance"><form onSubmit={event => { event.preventDefault(); command({ type: 'instance-create', name: newName, projectId: newProject, allowShared: sharesCheckout && allowShared }); }}>
+    {showCreate && <section className="new-instance" aria-label="Create Haze instance"><form onSubmit={event => { event.preventDefault(); command({ type: 'instance-create', name: newName, projectId: newProject, allowShared: sharesCheckout && allowShared, ...(resumeSession ? { launch: { mode: 'resume' as const, sessionId: resumeSession } } : {}) }); setResumeSession(undefined); }}>
       <label>Instance name<input aria-label="Instance name" value={newName} onChange={event => setNewName(event.target.value)} maxLength={80} required disabled={!!operation} /></label>
       <label>Approved project<select aria-label="Approved project" value={newProject} onChange={event => { setNewProject(event.target.value); setAllowShared(false); }} disabled={!!operation}>{fleet?.projects.map(project => <option key={project.id} value={project.id}>{project.name} — {project.cwd}</option>)}</select></label>
       {sharesCheckout && <label className="check-row"><input type="checkbox" aria-label="Allow shared checkout" checked={allowShared} onChange={event => setAllowShared(event.target.checked)} disabled={!!operation} />Allow shared checkout. These instances can edit the same files; use separate locally approved worktrees for independent writers.</label>}
-      <button className="primary" type="submit" disabled={!canOperate || !!operation || !newName.trim() || (sharesCheckout && !allowShared)}>{operation === 'instance-create' ? 'Starting…' : 'Start Haze'}</button><button type="button" disabled={!!operation} onClick={() => setShowCreate(false)}>Cancel</button>
+      <button className="primary" type="submit" disabled={!canOperate || !!operation || !newName.trim() || (sharesCheckout && !allowShared)}>{operation === 'instance-create' ? 'Starting…' : resumeSession ? 'Resume session' : 'Start Haze'}</button><button type="button" disabled={!!operation} onClick={() => { setShowCreate(false); setResumeSession(undefined); }}>Cancel</button>
     </form></section>}
     <div className={`fleet-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
-    <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} selectedKey={watchedWorker} output={workerOutput} onSelect={selectWorker} /></div>
+    <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><div className="sidebar-content">
+      <SidebarTabs tab={sidebarTab} onSelect={setSidebarTab} />
+      {sidebarTab === 'subagents'
+        ? <SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} selectedKey={watchedWorker} output={workerOutput} onSelect={selectWorker} />
+        : <SessionsSidebar visible={sidebarOpen && sidebarTab === 'sessions'} instance={activeInstance} connected={canOperate} busy={!!operation} request={requestManagement} onLaunch={(session: SessionInfo, mode) => {
+          if (mode === 'fork') { setError('Forking is prepared on the server; use Resume for now, or fork from Haze’s native /sessions picker.'); return; }
+          setNewName(`Session ${session.id.slice(0, 8)}`); setNewProject(activeInstance?.projectId ?? ''); setAllowShared(true); setShowCreate(true); setResumeSession(session.id);
+        }} />}
+    </div></div>
     <section id="fleet-terminal" className="terminal-pane" role="tabpanel" aria-labelledby={activeId ? `tab-${activeId}` : undefined}>
     <div className="terminal-toolbar">
       <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>

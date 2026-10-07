@@ -247,7 +247,7 @@ test('fleet tabs launch real PTYs, isolate terminal input, reconnect without dup
 test('subagent sidebar shows observed runs with live output and retains finished runs for inspection', async ({ page }) => {
   await pair(page);
   const sidebar = page.getByRole('complementary', { name: 'Subagents', exact: true });
-  if (!await sidebar.isVisible()) await page.getByRole('button', { name: 'Subagents', exact: true }).click();
+  if (!await sidebar.isVisible()) await page.getByRole('button', { name: 'Sidebar', exact: true }).click();
   await expect(sidebar).toContainText('Observation: observing');
   const overlay = page.getByRole('region', { name: 'Subagent run' });
   await expect(overlay).toHaveCount(0);
@@ -277,7 +277,7 @@ test('subagent sidebar shows observed runs with live output and retains finished
   await expect(sidebar.getByRole('button', { name: /Audit the payment module/ })).toContainText('finished');
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(sidebar).toBeHidden();
-  await page.getByRole('button', { name: 'Subagents', exact: true }).click();
+  await page.getByRole('button', { name: 'Sidebar', exact: true }).click();
   await expect(sidebar).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

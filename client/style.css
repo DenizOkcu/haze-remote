@@ -160,7 +160,23 @@ footer { font-size: 10px; color: var(--text-faint); padding: 6px 14px; text-alig
 .check-row input { width: 18px; height: 18px; flex-shrink: 0; }
 
 /* ---------- Subagent sidebar & overlay ---------- */
-.sidebar-container { width: 300px; flex-shrink: 0; overflow-y: auto; border-left: 1px solid var(--border); background: var(--bg-elevated); }
+.sidebar-container { width: 320px; flex-shrink: 0; overflow-y: auto; border-left: 1px solid var(--border); background: var(--bg-elevated); }
+.sidebar-content { display: flex; flex-direction: column; min-height: 100%; }
+.sidebar-tabs { display: flex; gap: 6px; padding: 10px 14px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.sidebar-tabs button { flex: 1; background: transparent; border-color: transparent; border-radius: var(--radius-sm) var(--radius-sm) 0 0; font-size: 12px; padding: 8px 10px; min-height: 0; }
+.sidebar-tabs button[aria-selected="true"] { color: var(--accent); background: var(--surface); border-bottom: 2px solid var(--accent); }
+.sessions-sidebar { padding: 14px; font-size: 12px; flex: 1; }
+.sessions-sidebar > header { padding: 0 0 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.sessions-sidebar h2 { font-size: 15px; margin: 0 0 6px; }
+.sessions-sidebar p { line-height: 1.5; margin: 8px 0; color: var(--text-muted); }
+.session-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.session-item { display: flex; gap: 6px; align-items: stretch; }
+.session-item .session-main { flex: 1; min-width: 0; text-align: left; padding: 10px; }
+.session-item button { font-size: 12px; overflow-wrap: anywhere; }
+.session-item strong, .session-item span, .session-item small { display: block; }
+.session-item span { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+.session-item small { color: var(--accent); font-size: 11px; margin-top: 3px; }
+.sessions-sidebar .fine-print { margin-top: 12px; }
 .subagent-sidebar { padding: 14px; font-size: 12px; overflow-wrap: anywhere; }
 .subagent-sidebar > header { display: block; padding: 0 0 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
 .subagent-sidebar h2 { font-size: 15px; margin: 0 0 6px; }
@@ -192,6 +208,8 @@ footer { font-size: 10px; color: var(--text-faint); padding: 6px 14px; text-alig
   .wordmark { font-size: 18px; } .wordmark span { font-size: 13px; }
   .connection-meta { display: none; }
   .pair-card { padding: 24px; }
+  .workspace-tabs { gap: 4px; padding: 6px 10px 0; }
+  .workspace-tabs button { padding: 8px 10px; font-size: 12px; }
   .fleet-navigation { gap: 4px; padding: 6px 10px; }
   .fleet-tabs button { min-width: 105px; padding: 7px 10px; }
   .fleet-navigation > button { padding: 6px 9px; font-size: 12px; }

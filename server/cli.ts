@@ -43,7 +43,7 @@ Terminal transport is encrypted, but HTTP page delivery can be modified by an ac
 network attacker. Use only trusted private networks. Keep this computer awake.`);
     return;
   }
-  if (parsed.values.version) { console.log('haze-remote 0.1.0'); return; }
+  if (parsed.values.version) { console.log('@denizokcu/haze-remote 0.0.1'); return; }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('A local interactive terminal is required for device approval. Do not pipe stdin/stdout.');
   const port = Number(parsed.values.port);
   if (!/^\d+$/.test(parsed.values.port!) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Port must be an integer between 0 and 65535.');
