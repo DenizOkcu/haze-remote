@@ -1,5 +1,5 @@
 import { randomInt, randomBytes, timingSafeEqual } from 'node:crypto';
-import { CONFIRM_MS, PIN_MS, confirmationCode, opaque, registration } from '../shared/crypto.js';
+import { CONFIRM_MS, PIN_MS, REVIEW_MS, confirmationCode, opaque, registration } from '../shared/crypto.js';
 
 export interface DeviceReview {
   id: string;
@@ -61,8 +61,13 @@ export class PairingGate {
   confirm(code: string): DeviceReview {
     this.tick();
     const candidate = this.candidate;
+    if (candidate?.verified) throw new Error('Code B already consumed; approve or reject the reviewed request');
     if (!candidate || !/^\d{8}$/.test(code) || !timingSafeEqual(Buffer.from(code), Buffer.from(candidate.code))) throw new Error('Incorrect or expired code B');
     candidate.verified = true;
+    candidate.code = '';
+    // Code entry and device review have independent deadlines. A consumed
+    // code cannot be entered again to extend this request's review window.
+    candidate.expiresAt = this.now() + REVIEW_MS;
     // Never expose code B in the local review or through the network.
     const { id, peer, browser, platform, expiresAt } = candidate;
     return { id, peer, browser, platform, expiresAt };

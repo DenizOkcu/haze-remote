@@ -40,10 +40,10 @@ The default without `--lan`/`--host` is loopback (`127.0.0.1`). Bindings to `0.0
 ### Two-way pairing
 
 1. Open the printed HTTP address on the tablet.
-2. Enter **PIN A** displayed in the computer terminal. It is eight digits and rotates/expires every **20 seconds**. The PAKE handshake proves possession without transmitting the PIN directly.
-3. The browser displays **code B**, bound to that handshake. Enter it using the keyboard in the computer's **haze-remote local control terminal**, within **20 seconds**.
-4. The computer displays the observed network peer IP and reported browser/platform. Check the tablet's IP in its Wi-Fi settings. Browser/platform are self-reported and spoofable; VPN/proxy addresses may differ. No physical location is inferred.
-5. Type **`approve`** locally before code B expires, or **`reject`**. Confirming code B alone does not authorize access. No project metadata, terminal output, or input is available before final approval.
+2. Enter **PIN A** displayed in the computer terminal. It is eight digits and rotates/expires every **60 seconds**. The PAKE handshake proves possession without transmitting the PIN directly.
+3. The browser displays **code B**, bound to that handshake. Enter it using the keyboard in the computer's **haze-remote local control terminal**, within **two minutes**. This deadline starts after PIN A verification, independently of PIN A rotation.
+4. Successful code B entry consumes that code and starts a fresh **two-minute review window**. The computer displays the observed network peer IP and reported browser/platform. Check the tablet's IP in its Wi-Fi settings. Browser/platform are self-reported and spoofable; VPN/proxy addresses may differ. No physical location is inferred.
+5. Type **`approve`** locally before the review window expires, or **`reject`**. Re-entering code B cannot extend the deadline. Confirming code B alone does not authorize access. No project metadata, terminal output, or input is available before final approval.
 6. Pairing closes. Only **one browser credential** may be approved for this Haze process. The browser remembers its credential in IndexedDB and re-authenticates on reconnect; PIN rotation does not interrupt approved connections.
 
 Five handshake starts exhaust the pairing allowance, including abandoned/wrong-PIN requests. Rotation does not reset it. Type `pair` locally to reopen the window/reset the allowance when no device is approved. Someone can deliberately exhaust this budget; this is a known denial-of-service tradeoff, not a lockout bypass.
@@ -56,7 +56,7 @@ These are handled by haze-remote's own stdin, **not** the bridged Haze PTY. No H
 
 | Input | Action |
 | --- | --- |
-| Eight-digit code B | Validate the pending handshake and show its device review |
+| Eight-digit code B | Consume the confirmation code and start a separate two-minute device review |
 | `approve` | Approve the reviewed request if still valid |
 | `reject` | Reject the pending request |
 | `pair` | Reopen pairing/reset attempt allowance; refused while a device is approved |

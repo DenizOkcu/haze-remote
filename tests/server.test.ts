@@ -124,3 +124,47 @@ test('plaintext and replayed frames cannot control PTY; invalid resize rejected;
     await f.remote.close(); assert.throws(() => process.kill(f.remote.pid, 0));
   } finally { sockets.forEach(ws => ws.terminate()); await f.cleanup(); }
 });
+
+test('review extends the pending socket deadline without enabling terminal access', { timeout: 15000 }, async t => {
+  const f = await fixture();
+  const sockets: WebSocket[] = [];
+  try {
+    const first = await connection(f.origin, f.remote.local.pin()!.pin);
+    sockets.push(first.ws);
+    await until(() => !!first.state.code);
+    await delay(100); // Enrollment must reach the server before local code entry.
+    const codeDeadline = first.state.expiresAt!;
+    t.mock.timers.enable({ apis: ['Date'], now: codeDeadline - 1 });
+    const review = f.remote.local.confirm(first.state.code!);
+    assert.equal(review.expiresAt, Date.now() + 120_000);
+    await until(() => first.state.reviewExpiresAt === review.expiresAt);
+    assert.throws(() => f.remote.local.confirm(first.state.code!), /consumed/);
+    t.mock.timers.tick(2); // Cross the original code deadline, not the review deadline.
+    await delay(300); // Exercise the real lifecycle interval and socket deadline.
+    assert.equal(first.state.closed, undefined);
+    assert.equal(first.messages.length, 0);
+    assert.equal(first.session.send({ type: 'input', data: 'NO_ACCESS_YET' }), false);
+    t.mock.timers.tick(review.expiresAt - Date.now() - 1);
+    f.remote.local.approve(review.id);
+    await until(() => first.messages.some(m => m.type === 'snapshot'));
+    t.mock.timers.reset();
+    f.remote.local.revoke();
+    await until(() => first.state.closed === 4001);
+    f.remote.local.pair();
+    const second = await connection(f.origin, f.remote.local.pin()!.pin);
+    sockets.push(second.ws);
+    await until(() => !!second.state.code);
+    await delay(100);
+    const secondReview = f.remote.local.confirm(second.state.code!);
+    await until(() => second.state.reviewExpiresAt === secondReview.expiresAt);
+    t.mock.timers.enable({ apis: ['Date'], now: secondReview.expiresAt });
+    assert.throws(() => f.remote.local.approve(secondReview.id), /expired/);
+    await until(() => second.state.closed === 4001);
+    assert.equal(second.messages.length, 0);
+    assert.equal(second.state.credential, undefined);
+    process.kill(f.remote.pid, 0);
+  } finally {
+    t.mock.timers.reset();
+    sockets.forEach(ws => ws.terminate()); await f.cleanup();
+  }
+});

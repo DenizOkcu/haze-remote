@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cryptoReady, opaque, EncryptedChannel, confirmationCode } from '../shared/crypto.js';
+import { cryptoReady, opaque, EncryptedChannel, confirmationCode, PIN_MS, CONFIRM_MS, REVIEW_MS } from '../shared/crypto.js';
 import { PairingGate, describeDevice } from '../server/pairing.js';
 await cryptoReady;
 
@@ -42,14 +42,18 @@ test('PIN expiry, fixed cross-rotation attempt budget, code B expiry and explici
   const original = gate.localPin()!.pin;
   const { client, challenge } = handshake(gate);
   assert.ok(client);
-  now = 20000;
+  assert.equal(PIN_MS, 60_000);
+  assert.equal(CONFIRM_MS, 120_000);
+  assert.equal(REVIEW_MS, 120_000);
+  assert.equal(gate.localPin()!.expiresAt, PIN_MS);
+  now = PIN_MS;
   assert.throws(() => gate.finish(challenge, client.finishLoginRequest), /expired/);
   gate.tick();
   assert.ok(gate.localPin()!.expiresAt > now);
   // Expired PIN cannot authenticate against the new registration record.
   assert.equal(handshake(gate, original).client, undefined);
-  for (let i = 0; i < 3; i++) { now += 20000; gate.tick(); handshake(gate, 'wrong'); }
-  now += 20000; gate.tick();
+  for (let i = 0; i < 3; i++) { now += PIN_MS; gate.tick(); handshake(gate, 'wrong'); }
+  now += PIN_MS; gate.tick();
   assert.equal(gate.localPin(), null);
   assert.throws(() => handshake(gate, 'wrong'), /closed/);
   gate.reopen();
@@ -63,12 +67,23 @@ test('PIN expiry, fixed cross-rotation attempt budget, code B expiry and explici
   const review = gate.confirm(confirmationCode(key));
   assert.equal(review.peer, '192.168.1.42');
   assert.ok(!('code' in review));
-  now += 20000;
+  now = review.expiresAt;
   assert.throws(() => gate.approve(pending.id), /expired/);
   assert.equal(rejected, 1);
   gate.reopen();
   const candidate = gate.pending(key, { peer: '127.0.0.1', browser: 'Firefox', platform: 'Linux' }, () => approved++, () => rejected++);
-  gate.confirm(confirmationCode(key));
+  const codeDeadline = candidate.expiresAt;
+  now = codeDeadline - 1;
+  const freshReview = gate.confirm(confirmationCode(key));
+  assert.equal(freshReview.expiresAt, now + REVIEW_MS);
+  const reviewDeadline = freshReview.expiresAt;
+  assert.throws(() => gate.confirm(confirmationCode(key)), /consumed/);
+  assert.equal(candidate.expiresAt, reviewDeadline, 'Re-entering code B cannot refresh review');
+  now = codeDeadline + 1;
+  gate.tick();
+  assert.equal(rejected, 1, 'Original code expiry cannot cancel an already reviewed request');
+  assert.throws(() => gate.approve('different-request'), /Confirm/);
+  now = reviewDeadline - 1;
   gate.approve(candidate.id);
   assert.equal(approved, 1);
   assert.equal(gate.localPin(), null);
@@ -80,4 +95,17 @@ test('requester metadata cannot inject terminal escapes or fake the observed IP'
   assert.equal(device.peer, '192.168.1.42');
   assert.equal(device.browser, 'Chrome 123.0');
   assert.ok(!JSON.stringify(device).includes('APPROVED'));
+});
+
+test('unconfirmed code B expires exactly at its own deadline', () => {
+  let now = 0;
+  let rejected = 0;
+  const gate = new PairingGate(() => now);
+  const key = 'test-only-session-key';
+  const request = gate.pending(key, { peer: '127.0.0.1', browser: 'Firefox', platform: 'Linux' }, () => assert.fail('Expired code must not authorize access'), () => rejected++);
+  assert.equal(request.expiresAt, CONFIRM_MS);
+  now = CONFIRM_MS;
+  assert.throws(() => gate.confirm(confirmationCode(key)), /expired/);
+  assert.throws(() => gate.approve(request.id), /expired/);
+  assert.equal(rejected, 1);
 });

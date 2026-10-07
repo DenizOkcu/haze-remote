@@ -14,7 +14,8 @@ export interface SessionOptions {
   serverId: string;
   password: string;
   credential?: DeviceCredential;
-  onPending?: (code: string, expiresAt: number) => void;
+  onPending?: (code: string, expiresAt: number, remainingMs: number) => void;
+  onReview?: (expiresAt: number, remainingMs: number) => void;
   onApproved?: (credential: DeviceCredential) => void;
   onError?: (message: string) => void;
   onClose?: (code: number) => void;
@@ -62,7 +63,13 @@ export class ClientSession {
         if (message.type === 'pending') {
           this.newPassword = devicePassword();
           socket.send(JSON.stringify(this.channel.seal({ type: 'enroll', password: this.newPassword })));
-          options.onPending?.(this.code, message.expiresAt);
+          options.onPending?.(this.code, message.expiresAt, message.remainingMs);
+          return;
+        }
+        if (message.type === 'review') {
+          if (!this.newPassword || this.authorized || options.credential) throw new Error('Unexpected local review');
+          this.code = '';
+          options.onReview?.(message.expiresAt, message.remainingMs);
           return;
         }
         if (message.type === 'approved') {

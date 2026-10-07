@@ -42,8 +42,13 @@ export class AccessController {
     for (const connection of this.connections.values()) if (Date.now() >= connection.deadline) this.fail(connection, 'Connection or approval expired', connection.phase === 'active' ? 4002 : 4001);
   }
   confirm(code: string) {
+    this.tick();
+    const connection = [...this.connections.values()].find(c => c.pendingId && c.phase === 'review' && c.enrollment);
+    if (!connection) throw new Error('Device enrollment is not ready or the request expired');
     const review = this.gate.confirm(code);
-    if (![...this.connections.values()].some(c => c.pendingId === review.id && c.phase === 'review' && c.enrollment)) throw new Error('Device enrollment is not ready');
+    if (connection.pendingId !== review.id) throw new Error('Pending request mismatch');
+    connection.deadline = review.expiresAt;
+    this.send(connection.ws, { type: 'review', expiresAt: review.expiresAt, remainingMs: review.expiresAt - Date.now() });
     return review;
   }
   approve(id: string) { this.gate.approve(id); this.publishPin(); }
@@ -131,7 +136,7 @@ export class AccessController {
             }, () => this.fail(connection, 'Pairing rejected or expired', 4001));
             connection.pendingId = candidate.id;
             connection.deadline = candidate.expiresAt;
-            this.send(ws, { type: 'pending', expiresAt: candidate.expiresAt });
+            this.send(ws, { type: 'pending', expiresAt: candidate.expiresAt, remainingMs: candidate.expiresAt - Date.now() });
           }
           return;
         }

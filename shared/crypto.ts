@@ -4,8 +4,9 @@ import sodium from 'libsodium-wrappers';
 export { opaque };
 export const cryptoReady = Promise.all([opaque.ready, sodium.ready]);
 export const PROTOCOL = 'haze-remote/2';
-export const PIN_MS = 20_000;
-export const CONFIRM_MS = 20_000;
+export const PIN_MS = 60_000;
+export const CONFIRM_MS = 120_000;
+export const REVIEW_MS = 120_000;
 export type DeviceCredential = { serverId: string; deviceId: string; password: string; serverPublicKey: string };
 
 // OPAQUE's session key is an opaque encoded string. Hash its complete encoding

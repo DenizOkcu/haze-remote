@@ -33,10 +33,16 @@ async function pair(page: import('@playwright/test').Page, navigate = true) {
   await page.getByLabel('PIN A', { exact: true }).fill(remote.local.pin()!.pin);
   await page.getByRole('button', { name: 'Pair this browser' }).click();
   await expect(page.getByLabel('Code B')).toHaveText(/^\d{8}$/);
+  await expect(page.getByRole('status')).toContainText('Enter code B on computer');
+  await expect(page.getByRole('status')).toHaveText(/· (2:00|1:5\d) remaining/);
   await expect(page.locator('[aria-label="Haze terminal"]')).toHaveCount(0);
   const code = await page.getByLabel('Code B').textContent();
   const review = remote.local.confirm(code!);
   await expect(page.getByRole('status')).toContainText('Awaiting local approval');
+  await expect(page.getByRole('status')).toHaveText(/· (2:00|1:5\d) remaining/);
+  await expect(page.getByLabel('Code B')).toHaveCount(0);
+  await expect(page.getByText('Code B confirmed.', { exact: false })).toBeVisible();
+  await expect(page.locator('[aria-label="Haze terminal"]')).toHaveCount(0);
   remote.local.approve(review.id);
   await expect(page.getByRole('status')).toHaveText('Connected');
 }

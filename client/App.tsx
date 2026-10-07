@@ -2,15 +2,15 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClientSession } from '../shared/session.js';
-import type { DeviceCredential } from '../shared/crypto.js';
+import { CONFIRM_MS, REVIEW_MS, PIN_MS, type DeviceCredential } from '../shared/crypto.js';
 import { loadCredential, saveCredential, forgetCredential } from './credentials';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited';
 export function App() {
   const [paired, setPaired] = useState<boolean | null>(null);
   const [code, setCode] = useState('');
-  const [pending, setPending] = useState<{ code: string; expiresAt: number }>();
-  const [remaining, setRemaining] = useState(20);
+  const [pending, setPending] = useState<{ code?: string; stage: 'confirm' | 'review'; expiresAt: number }>();
+  const [remaining, setRemaining] = useState(CONFIRM_MS / 1000);
   const [pairingOpen, setPairingOpen] = useState(false);
   const [serverPaired, setServerPaired] = useState(false);
   const [error, setError] = useState('');
@@ -32,8 +32,11 @@ export function App() {
   function openSession(password: string, remembered?: DeviceCredential) {
     const connection = new ClientSession(new WebSocket(`ws://${location.host}/ws`), {
       serverId: serverId.current, password, credential: remembered,
-      onPending(code, expiresAt) {
-        setPending({ code, expiresAt: Math.min(Date.now() + 20_000, expiresAt) });
+      onPending(code, _expiresAt, remainingMs) {
+        setPending({ code, stage: 'confirm', expiresAt: Date.now() + Math.max(0, Math.min(CONFIRM_MS, remainingMs)) });
+      },
+      onReview(_expiresAt, remainingMs) {
+        setPending({ stage: 'review', expiresAt: Date.now() + Math.max(0, Math.min(REVIEW_MS, remainingMs)) });
       },
       async onApproved(value) {
         credential.current = value;
@@ -205,11 +208,13 @@ export function App() {
     <div className="wordmark">haze<span> / remote</span></div>
     <h1>Your terminal. Locally approved.</h1>
     {pending ? <>
-      <p>Enter this code B using the keyboard on the computer running haze-remote, review the device there, then type <strong>approve</strong>.</p>
-      <div className="confirmation-code" aria-label="Code B">{remaining > 0 ? pending.code : 'Expired'}</div>
-      <p role="status">Awaiting local approval · {remaining}s remaining</p>
+      {pending.stage === 'confirm' ? <>
+        <p>Enter this code B using the keyboard on the computer running haze-remote. You have two minutes; entering it starts a separate two-minute device review.</p>
+        <div className="confirmation-code" aria-label="Code B">{remaining > 0 ? pending.code : 'Expired'}</div>
+      </> : <p>Code B confirmed. Review the device information on the computer, then type <strong>approve</strong> or <strong>reject</strong>. Terminal access is still disabled.</p>}
+      <p role="status">{pending.stage === 'confirm' ? 'Enter code B on computer' : 'Awaiting local approval'} · {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')} remaining</p>
     </> : <>
-      <p>Enter the current PIN A from your computer. It rotates every 20 seconds. No terminal access is granted until you also confirm on the computer.</p>
+      <p>Enter the current PIN A from your computer. It rotates every {PIN_MS / 1000} seconds. No terminal access is granted until you also confirm on the computer.</p>
       {!pairingOpen && <p className="notice">{serverPaired ? 'A device is already paired. Revoke it locally before pairing another.' : 'Pairing closed. Type pair in the computer’s haze-remote terminal.'}</p>}
       <form onSubmit={pair}>
         <label htmlFor="code">PIN A</label>

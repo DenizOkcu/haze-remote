@@ -7,6 +7,7 @@ import { constants } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline';
 import { startRemote, privateAddress } from './server.js';
+import { PIN_MS, CONFIRM_MS, REVIEW_MS } from '../shared/crypto.js';
 
 async function main() {
   const args = process.argv.slice(2);
@@ -60,9 +61,9 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
   const remote = await startRemote({ host, port, cwd: resolve(parsed.values.cwd!), executable,
     args: split < 0 ? [] : args.slice(split + 1), assets: fileURLToPath(new URL('../client/', import.meta.url)),
     onPin(pin) {
-      console.log(pin ? `\nPIN A: ${pin.pin} · expires ${new Date(pin.expiresAt).toLocaleTimeString()} (20 seconds). Enter it in the browser.` : '\nPairing closed. Use "pair" to reopen when no device is paired.');
+      console.log(pin ? `\nPIN A: ${pin.pin} · expires ${new Date(pin.expiresAt).toLocaleTimeString()} (${PIN_MS / 1000} seconds). Enter it in the browser.` : '\nPairing closed. Use "pair" to reopen when no device is paired.');
     },
-    onPending() { console.log('\nBrowser passed PIN A. Enter the 8-digit code B shown on that device here within 20 seconds.'); },
+    onPending() { console.log(`\nBrowser passed PIN A. Enter the 8-digit code B shown on that device here within ${CONFIRM_MS / 60_000} minutes. Device review gets its own ${REVIEW_MS / 60_000} minutes after code entry.`); },
   });
   console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: http://${host.includes(':') ? `[${host}]` : host}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.\n`);
   const local = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -80,7 +81,7 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
       if (/^\d{8}$/.test(value)) {
         const review = remote.local.confirm(value);
         reviewId = review.id;
-        console.log(`\nApprove remote control of Haze?\nObserved network peer: ${review.peer}\nReported browser: ${review.browser}\nReported platform: ${review.platform}\nCheck the IP in your tablet’s Wi-Fi settings. Browser/platform are self-reported; VPN/proxy addresses may differ.\nNo physical location is inferred.\nThis grants terminal output/input and code execution with your permissions.\nType "approve" or "reject" before ${new Date(review.expiresAt).toLocaleTimeString()}.`);
+        console.log(`\nApprove remote control of Haze?\nObserved network peer: ${review.peer}\nReported browser: ${review.browser}\nReported platform: ${review.platform}\nCheck the IP in your tablet’s Wi-Fi settings. Browser/platform are self-reported; VPN/proxy addresses may differ.\nNo physical location is inferred.\nThis grants terminal output/input and code execution with your permissions.\nCode B consumed. You now have ${REVIEW_MS / 60_000} minutes to review this device.\nType "approve" or "reject" before ${new Date(review.expiresAt).toLocaleTimeString()}.`);
       } else if (value === 'approve') {
         if (!reviewId) throw new Error('Enter code B locally and review the device first.');
         remote.local.approve(reviewId); reviewId = undefined;
