@@ -168,3 +168,20 @@ test('review extends the pending socket deadline without enabling terminal acces
     sockets.forEach(ws => ws.terminate()); await f.cleanup();
   }
 });
+
+
+test('encrypted write failure closes the stream and is never retried', { timeout: 15000 }, async () => {
+  const f = await fixture();
+  let c: Awaited<ReturnType<typeof connection>> | undefined;
+  try {
+    c = await connection(f.origin, f.remote.local.pin()!.pin);
+    await until(() => !!c!.state.code);
+    f.remote.local.approve(f.remote.local.confirm(c.state.code!).id);
+    await until(() => c!.messages.some(m => m.type === 'snapshot'));
+    c.ws.send = (() => { throw new Error('synthetic write failure'); }) as any;
+    assert.throws(() => c!.session.send({ type: 'input', data: 'never-retry' }), /synthetic write failure/);
+    await until(() => c!.ws.readyState === WebSocket.CLOSED);
+    assert.equal(c.session.send({ type: 'input', data: 'never-retry' }), false);
+    assert.ok(!c.output().includes('never-retry'));
+  } finally { c?.ws.terminate(); await f.cleanup(); }
+});

@@ -1,8 +1,16 @@
 # haze-remote
 
-Control your installed [Haze](https://github.com/DenizOkcu/haze) terminal coding agent from a locally approved tablet browser. Haze runs unchanged on your computer in a real PTY. This separate package contains the TypeScript CLI/server and compiled React/xterm frontend—no Vite server is required in production.
+Run and steer a fleet of installed [Haze](https://github.com/DenizOkcu/haze) agents from one locally approved browser: instance tabs, independent terminals, and a subagent sidebar. Each Haze instance runs unchanged on your computer in its own real PTY. This separate package contains the TypeScript CLI/server and compiled React/xterm frontend—no Vite server is required in production.
 
 Haze still owns models, tools, project files, configuration, and durable sessions. haze-remote neither copies agent logic nor assumes an interactive remote-agent API.
+
+## Product research and direction
+
+The current direction is a fleet of Haze instances with a subagent sidebar. The Changes/Git review feature has been removed. Original Orca research and proposals are retained as historical context; [fleet usage](#fleet-of-haze-instances) and [subagent integration evidence](docs/fleet-and-subagents.md) describe the implementation.
+
+- [Orca analysis: how its UI supports agent steering](docs/orca-analysis.md)
+- [haze-remote product direction: UX, architecture, and boundaries](docs/haze-remote-product-direction.md)
+- [Value-first roadmap: quick wins, milestones, and acceptance criteria](docs/haze-remote-roadmap.md)
 
 ## Important security boundary
 
@@ -44,7 +52,7 @@ The default without `--lan`/`--host` is loopback (`127.0.0.1`). Bindings to `0.0
 3. The browser displays **code B**, bound to that handshake. Enter it using the keyboard in the computer's **haze-remote local control terminal**, within **two minutes**. This deadline starts after PIN A verification, independently of PIN A rotation.
 4. Successful code B entry consumes that code and starts a fresh **two-minute review window**. The computer displays the observed network peer IP and reported browser/platform. Check the tablet's IP in its Wi-Fi settings. Browser/platform are self-reported and spoofable; VPN/proxy addresses may differ. No physical location is inferred.
 5. Type **`approve`** locally before the review window expires, or **`reject`**. Re-entering code B cannot extend the deadline. Confirming code B alone does not authorize access. No project metadata, terminal output, or input is available before final approval.
-6. Pairing closes. Only **one browser credential** may be approved for this Haze process. The browser remembers its credential in IndexedDB and re-authenticates on reconnect; PIN rotation does not interrupt approved connections.
+6. Pairing closes. Only **one browser credential** may be approved for this server's entire fleet. The browser remembers its credential in IndexedDB and re-authenticates on reconnect; PIN rotation does not interrupt approved connections.
 
 Five handshake starts exhaust the pairing allowance, including abandoned/wrong-PIN requests. Rotation does not reset it. Type `pair` locally to reopen the window/reset the allowance when no device is approved. Someone can deliberately exhaust this budget; this is a known denial-of-service tradeoff, not a lockout bypass.
 
@@ -61,15 +69,52 @@ These are handled by haze-remote's own stdin, **not** the bridged Haze PTY. No H
 | `reject` | Reject the pending request |
 | `pair` | Reopen pairing/reset attempt allowance; refused while a device is approved |
 | `revoke` | Immediately revoke the credential and all its connections; Haze continues; pairing remains closed |
-| `quit` / local Ctrl+C | Stop haze-remote and its Haze child |
+| `quit` / local Ctrl+C | Stop haze-remote and all its Haze instances |
 
-**Unpair** in an authenticated browser revokes its credential through the encrypted channel. It does not terminate Haze or reopen pairing. To replace a device, type `revoke`, then `pair`, on the computer.
+**Unpair** asks for confirmation, then revokes the authenticated browser's credential through the encrypted channel. It does not terminate Haze or reopen pairing. To replace a device, type `revoke`, then `pair`, on the computer.
 
 ### Using the terminal
 
 Tap **Keyboard** for direct input, or compose a prompt, tap **Paste**, then **Enter**. Pasting deliberately does not submit automatically, so multiline prompts follow Haze's paste behavior. Touch keys provide Escape, Tab, arrows, Enter, and Ctrl+C; physical keyboards work too. Browser Ctrl+C follows Haze's interrupt semantics, not the local server shutdown command.
 
 The computer must stay awake and haze-remote must remain running. Tablet sleep, closed tabs, or lost connectivity do not stop Haze. Reconnect restores the same PID and recent screen/history. Input is never queued offline. Haze exiting leaves its final screen available until the server stops.
+
+### Terminal controls
+
+- **Draft recovery:** Paste retains your draft, including on failed/partial sends. “Queued locally” is not confirmation that Haze received or processed it. Inspect the terminal before Enter or retry; repeating the same attempted draft asks for confirmation. Drafts survive in-page reconnect but are not saved across reload and are cleared when access ends. **Clear draft** removes the current draft.
+- **Connection recovery:** host address, last authenticated contact, retry countdown, and **Retry now** help diagnose reachability. They do not infer whether the agent is working or finished. Another active tab still cannot be taken over automatically.
+- **Readability:** A−/A+ changes terminal text from 12–24px; only this non-sensitive preference is stored locally. **Latest output** scrolls to the bottom, **Expand composer** gives more typing space, and the layout follows the browser's visible viewport.
+- **Quick instructions:** progress, verification, approach review, and `/help` append editable text to your existing draft. Nothing is pasted or submitted automatically. Ctrl+C remains Haze's terminal interrupt, not a guaranteed pause or process-tree kill.
+
+### Fleet of Haze instances
+
+- **Tabs are real Haze processes**, not browser tabs or copies of one terminal. **New instance** lets you name an instance and choose a locally approved project. Each has its own PID, terminal screen/history, draft, and paste feedback. Left/Right/Home/End navigate instance tabs with a physical keyboard.
+- **Stop instance** confirms and terminates only the selected Haze process; other instances continue. Recent output stays visible. **Close tab** removes an exited instance, not project files; at least one tab remains.
+- Reconnect and reload restore the same server-owned fleet and last selected instance without spawning duplicates. Drafts are per-instance and survive switching/in-page reconnect, but not reload. Running/stopping/exited labels report process lifetime—not whether an agent is thinking or a task finished. Background output is marked on unselected tabs.
+- Up to **8 tabs**, including exited instances, and **16 locally approved projects** are supported. Close exited tabs to free slots. Creation request IDs are remembered to prevent duplicate launches; after 256 successful/pending launch IDs in one server lifetime, new launches are refused rather than forgetting old IDs.
+- Additional tabs launch fresh Haze sessions, not the initial `--continue`/`--resume` arguments. There is no import/attach to Haze processes started outside this server.
+- Instances in one checkout **share files**. Starting another in an occupied checkout requires an explicit **Allow shared checkout** acknowledgement. For parallel writers, create Git worktrees yourself and approve them at local startup:
+
+```sh
+haze-remote --lan --cwd /path/to/project --project /path/to/other-worktree
+# --project may be repeated. The browser cannot supply an arbitrary cwd/executable.
+```
+
+Project selection is not a sandbox: Haze retains your OS-user authority. There is no automatic worktree creation or merge/delete operation.
+
+### Subagent sidebar
+
+The sidebar belongs to the selected parent instance. Haze workers are in-process agents, not separate PTYs. To show real lifecycle metadata:
+
+1. In that Haze terminal, paste **`/session`**, then press **Enter**.
+2. Copy the displayed session ID into **Haze session ID** in the sidebar and choose **Link session**.
+3. See queued/started/terminal/settled workers, mode, timing, termination, and expandable details. **Quarantined** means execution may still be running even after a terminal result. **Unlink session** stops reading that feed.
+
+Linking is an explicit user association; the current Haze session header does not prove which PTY owns it. The adapter never guesses the newest session or counts OS children. If you use `/new` or `/resume`, relink the correct ID. `--no-session` cannot provide a feed; brand-new sessions may not exist on disk until Haze saves a resumable conversation.
+
+Only allowlisted lifecycle fields are forwarded. Prompts, tool output, provider configuration, and worker transcripts are not exposed by this adapter. Workers have no separate remote terminal or approval/interrupt API; steer their parent Haze. Session reads are scoped and bounded; see [integration details and limitations](docs/fleet-and-subagents.md).
+
+Git review is removed. Managed worktrees, multi-host routing, persistent fleet ownership across server restarts, HTTPS support, and cloud relay are not implemented.
 
 ## Install the built npm package
 
@@ -89,6 +134,7 @@ haze-remote [options] [-- <Haze arguments>]
 --port <number>  Default 8787; 0 selects a free port
 --cwd <path>     Default launch directory
 --haze <path>    Default haze on PATH
+--project <path> Approve an additional project/worktree (repeatable)
 -h, --help
 -v, --version
 ```
@@ -104,9 +150,9 @@ Those are Haze's existing session features; avoid print-mode arguments for inter
 
 ## Transport and recovery
 
-OPAQUE authenticates the pairing PIN or a 256-bit remembered device secret and establishes fresh keys on every connection. Libsodium XChaCha20-Poly1305 secretstream encrypts/authenticates ordered messages in independently keyed directions. It covers terminal input, resize, snapshots, output, enrollment, revocation requests, and application heartbeats. There is no plaintext terminal or cookie-authentication fallback.
+OPAQUE authenticates the pairing PIN or a 256-bit remembered device secret and establishes fresh keys on every connection. Libsodium XChaCha20-Poly1305 secretstream encrypts/authenticates ordered messages in independently keyed directions. It covers terminal input, resize, snapshots, output, enrollment, revocation requests, application heartbeats, and fleet lifecycle/subagent metadata messages. There is no plaintext terminal or cookie-authentication fallback.
 
-Browser cryptography uses bundled WASM/JavaScript implementations, not `crypto.subtle`, which is unavailable on ordinary LAN HTTP. Browser `crypto.getRandomValues` supplies secure randomness. All assets are bundled locally; there are no accounts, telemetry, cloud services, databases, Docker, or certificate setup requirements.
+Browser cryptography uses bundled WASM/JavaScript implementations, not `crypto.subtle`, which is unavailable on ordinary LAN HTTP. Browser `crypto.getRandomValues` supplies secure randomness. All assets are bundled locally; there are no accounts, cloud telemetry, cloud services, databases, Docker, or certificate setup requirements.
 
 The server keeps only one OPAQUE device registration record in RAM, not its raw secret. Restarting invalidates the pairing. Browser credentials are scoped to the origin/server instance and accessible to code running under that origin—an HTTP-delivery attacker remains a threat. Active sessions expire after 30 minutes and reconnect with a new handshake automatically. Credential authority lasts until revocation or server shutdown.
 

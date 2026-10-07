@@ -4,8 +4,14 @@ import { FitAddon } from '@xterm/addon-fit';
 import { ClientSession } from '../shared/session.js';
 import { CONFIRM_MS, REVIEW_MS, PIN_MS, type DeviceCredential } from '../shared/crypto.js';
 import { loadCredential, saveCredential, forgetCredential } from './credentials';
+import { sendTerminalInput, type InputResult } from './input';
+import { SubagentSidebar } from './SubagentSidebar';
+import type { FleetState, FleetRequest } from '../shared/fleet.js';
 
-type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited';
+type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
+type DraftMemory = { text: string; feedback: string; lastPaste?: { text: string; result: InputResult } };
+type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
+const requestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 export function App() {
   const [paired, setPaired] = useState<boolean | null>(null);
   const [code, setCode] = useState('');
@@ -20,14 +26,74 @@ export function App() {
   const [pid, setPid] = useState<number>();
   const [exitCode, setExitCode] = useState<number>();
   const [epoch, setEpoch] = useState(0);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraftState] = useState('');
+  const [fleet, setFleet] = useState<FleetState>();
+  const [activeId, setActiveId] = useState('');
+  const [operation, setOperation] = useState<string>();
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newProject, setNewProject] = useState('');
+  const [allowShared, setAllowShared] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
+  const display = useRef<{ id: string; viewId: string }>({ id: '', viewId: '' });
+  const draftMemory = useRef(new Map<string, DraftMemory>());
+  const seen = useRef(new Map<string, number>());
+  const pendingOperation = useRef<{ id: string; type: FleetRequest['type'] } | undefined>(undefined);
+  const operationTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const fleetRequest = useRef<(request: FleetRequest) => void>(() => {});
+  const [pasteFeedback, setPasteFeedbackState] = useState('');
+  const [fontSize, setFontSize] = useState(() => {
+    try { const value = Number(localStorage.getItem('haze-remote-font-size')); return value >= 12 && value <= 24 ? value : 14; }
+    catch { return 14; }
+  });
+  const [expanded, setExpanded] = useState(false);
+  const [retryAt, setRetryAt] = useState<number>();
+  const [clock, setClock] = useState(Date.now());
+  const lastContact = useRef<number | undefined>(undefined);
+  const retryNow = useRef<() => void>(() => {});
+  const fitCurrent = useRef<() => void>(() => {});
+  const currentFontSize = useRef(fontSize);
+  const pasteResult = useRef<InputResult | undefined>(undefined);
+  const pasting = useRef(false);
+  const lastPaste = useRef<{ text: string; result: InputResult } | undefined>(undefined);
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const credential = useRef<DeviceCredential | undefined>(undefined);
   const serverId = useRef('');
   const session = useRef<ClientSession | undefined>(undefined);
   const closed = useRef<((code: number) => void) | undefined>(undefined);
-  const input = useRef<(data: string) => boolean>(() => false);
+  const input = useRef<(data: string) => InputResult>(() => 'not-sent');
+  function currentDraft() {
+    let value = draftMemory.current.get(display.current.id);
+    if (!value) { value = { text: '', feedback: '' }; draftMemory.current.set(display.current.id, value); }
+    return value;
+  }
+  function setDraft(value: string | ((text: string) => string)) {
+    const memory = currentDraft(); memory.text = typeof value === 'function' ? value(memory.text) : value;
+    setDraftState(memory.text);
+  }
+  function setPasteFeedback(value: string) { currentDraft().feedback = value; setPasteFeedbackState(value); }
+  function finishOperation(id?: string) {
+    if (id && pendingOperation.current?.id !== id) return;
+    clearTimeout(operationTimeout.current); pendingOperation.current = undefined; setOperation(undefined);
+  }
+  const command = (request: FleetCommand) => fleetRequest.current({ ...request, requestId: requestId() });
+
+  useEffect(() => {
+    currentFontSize.current = fontSize;
+    if (terminal.current) { terminal.current.options.fontSize = fontSize; fitCurrent.current(); }
+    try { localStorage.setItem('haze-remote-font-size', String(fontSize)); } catch { /* Preference storage is optional. */ }
+  }, [fontSize]);
+  useEffect(() => {
+    if (!paired) return;
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    const viewport = window.visualViewport;
+    const resize = () => document.documentElement.style.setProperty('--viewport-height', `${viewport?.height ?? window.innerHeight}px`);
+    const narrow = window.matchMedia('(max-width: 760px)');
+    const collapseSidebar = () => { if (narrow.matches) setSidebarOpen(false); };
+    resize(); viewport?.addEventListener('resize', resize); narrow.addEventListener('change', collapseSidebar);
+    return () => { clearInterval(timer); viewport?.removeEventListener('resize', resize); narrow.removeEventListener('change', collapseSidebar); document.documentElement.style.removeProperty('--viewport-height'); };
+  }, [paired]);
 
   function openSession(password: string, remembered?: DeviceCredential) {
     const connection = new ClientSession(new WebSocket(`ws://${location.host}/ws`), {
@@ -98,57 +164,122 @@ export function App() {
     let attempt = 0, lastPong = Date.now();
     let retry: ReturnType<typeof setTimeout> | undefined;
     let unsubscribe: (() => void) | undefined;
-    const term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 2000, disableStdin: true,
+    const term = new Terminal({ cursorBlink: true, fontSize: currentFontSize.current, scrollback: 2000, disableStdin: true,
       theme: { background: '#11151b', foreground: '#e5eaf0', cursor: '#a5dcc9', selectionBackground: '#354e59' },
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host.current); terminal.current = term;
     const send = (message: unknown) => session.current?.send(message) ?? false;
     input.current = data => {
-      if (!ready || processExited || session.current?.socket.readyState !== WebSocket.OPEN || session.current.socket.bufferedAmount > 256 * 1024) return false;
-      if (new TextEncoder().encode(data).byteLength > 64 * 1024) { setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.'); return false; }
-      const characters = Array.from(data);
-      for (let i = 0; i < characters.length; i += 4096) if (!send({ type: 'input', data: characters.slice(i, i + 4096).join('') })) return false;
-      return true;
+      const target = display.current;
+      const result = sendTerminalInput(data, ready && !processExited && session.current?.socket.readyState === WebSocket.OPEN,
+        message => send({ ...message, instanceId: target.id, viewId: target.viewId }));
+      if (result === 'too-large') setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.');
+      else if (result !== 'queued') setError(result === 'partial'
+        ? 'Input delivery is uncertain or partial. Inspect the terminal before retrying; nothing will be replayed automatically.'
+        : 'Input was not sent. Reconnect or wait for the connection to catch up, then retry.');
+      return result;
     };
     const fitTerminal = () => {
-      if (!ready) return;
+      if (!ready || !host.current?.offsetParent) return;
       const dimensions = fit.proposeDimensions(); if (!dimensions) return;
       const cols = Math.min(240, Math.max(20, dimensions.cols)), rows = Math.min(100, Math.max(5, dimensions.rows));
-      term.resize(cols, rows); if (!processExited) send({ type: 'resize', cols, rows });
+      term.resize(cols, rows); if (!processExited) send({ type: 'resize', cols, rows, instanceId: display.current.id, viewId: display.current.viewId });
     };
+    fitCurrent.current = fitTerminal;
     const resize = new ResizeObserver(fitTerminal); resize.observe(host.current);
-    const dataListener = term.onData(data => { input.current(data); });
+    const dataListener = term.onData(data => {
+      const result = input.current(data);
+      if (pasting.current) pasteResult.current = result;
+    });
     const disconnectInput = () => { ready = false; term.options.disableStdin = true; };
+    fleetRequest.current = request => {
+      if (!ready || pendingOperation.current || session.current?.socket.readyState !== WebSocket.OPEN) return;
+      const navigation = request.type === 'instance-create' || request.type === 'instance-select';
+      pendingOperation.current = { id: request.requestId, type: request.type }; setOperation(request.type); setError('');
+      if (navigation) { disconnectInput(); setStatus('Switching'); }
+      try {
+        if (!send(request)) throw new Error('Request not sent');
+        operationTimeout.current = setTimeout(() => {
+          finishOperation(request.requestId); setError('Fleet operation was not confirmed. Reconnecting to restore the actual fleet; no launch or input will be replayed.');
+          session.current?.close();
+        }, 12_000);
+      } catch {
+        finishOperation(request.requestId); setError('Fleet request was not sent or delivery is uncertain. Inspect the fleet after reconnecting before retrying.');
+        if (navigation) { ready = true; term.options.disableStdin = processExited; setStatus(processExited ? 'Exited' : 'Connected'); }
+      }
+    };
     const dropCredential = () => {
       reconnectAllowed = false; credential.current = undefined;
       void forgetCredential().catch(() => {}); setPending(undefined); setPaired(false);
+      setDraft(''); setPasteFeedback(''); lastPaste.current = undefined;
+      setProject(''); setPid(undefined); lastContact.current = undefined; setRetryAt(undefined);
+      draftMemory.current.clear(); seen.current.clear(); display.current = { id: '', viewId: '' };
+      setFleet(undefined); setActiveId(''); setShowCreate(false); finishOperation();
     };
     function attach(connection: ClientSession) {
       unsubscribe?.();
       unsubscribe = connection.subscribe(message => {
         if (disposed || session.current !== connection) return;
+        lastContact.current = Date.now();
         if (message.type === 'snapshot') {
+          const pending = pendingOperation.current;
+          const focusSelectedTab = pending?.type === 'instance-select';
+          if (pending && (pending.type === 'instance-select' || pending.type === 'instance-create') && message.requestId !== pending.id) return;
+          disconnectInput();
+          currentDraft().lastPaste = lastPaste.current;
+          const target = { id: message.instanceId, viewId: message.viewId }; display.current = target;
+          const memory = currentDraft(); setDraftState(memory.text); setPasteFeedbackState(memory.feedback); lastPaste.current = memory.lastPaste;
+          setActiveId(target.id); setFleet(message.fleet); seen.current.set(target.id, Date.now());
+          if (pending?.type === 'instance-create') setShowCreate(false);
+          if (message.requestId) finishOperation(message.requestId);
           term.reset(); term.resize(message.cols, message.rows);
           setProject(message.cwd); setPid(message.pid);
           processExited = message.exit !== null; setExitCode(message.exit?.exitCode);
           term.write(message.data, () => {
-            if (disposed || session.current !== connection || connection.socket.readyState !== WebSocket.OPEN) return;
-            ready = true; attempt = 0; lastPong = Date.now();
+            if (disposed || session.current !== connection || display.current !== target || connection.socket.readyState !== WebSocket.OPEN) return;
+            ready = true; attempt = 0; lastPong = Date.now(); setRetryAt(undefined);
             term.options.disableStdin = processExited; setStatus(processExited ? 'Exited' : 'Connected'); fitTerminal();
+            if (focusSelectedTab) document.getElementById(`tab-${target.id}`)?.focus();
           });
-        } else if (message.type === 'output') term.write(message.data);
-        else if (message.type === 'exit') { processExited = true; term.options.disableStdin = true; setExitCode(message.exitCode); setStatus('Exited'); }
-        else if (message.type === 'pong') lastPong = Date.now();
+        } else if (message.type === 'output') {
+          if (message.instanceId === display.current.id && message.viewId === display.current.viewId) term.write(message.data);
+        } else if (message.type === 'exit') {
+          if (message.instanceId === display.current.id && message.viewId === display.current.viewId) {
+            processExited = true; term.options.disableStdin = true; setExitCode(message.exitCode); setStatus('Exited');
+          }
+        } else if (message.type === 'fleet') {
+          setFleet(message.fleet);
+          const active = message.fleet.instances.find((instance: any) => instance.id === display.current.id);
+          if (active) {
+            seen.current.set(active.id, active.lastActivity ?? Date.now());
+            if (ready && active.state !== 'running') { processExited = true; term.options.disableStdin = true; setExitCode(active.exit?.exitCode); setStatus(active.state === 'stopping' ? 'Stopping' : 'Exited'); }
+          }
+          const ids = new Set(message.fleet.instances.map((instance: any) => instance.id));
+          for (const id of draftMemory.current.keys()) if (!ids.has(id)) draftMemory.current.delete(id);
+        } else if (message.type === 'fleet-result') finishOperation(message.requestId);
+        else if (message.type === 'fleet-error') {
+          setError(message.message);
+          if (message.requestId && pendingOperation.current && message.requestId === pendingOperation.current.id) {
+            const navigation = ['instance-create', 'instance-select'].includes(pendingOperation.current!.type);
+            finishOperation(message.requestId);
+            if (navigation) { ready = true; term.options.disableStdin = processExited; setStatus(processExited ? 'Exited' : 'Connected'); }
+          }
+        } else if (message.type === 'pong') lastPong = Date.now();
       });
     }
     async function connect() {
-      if (disposed || connecting || !reconnectAllowed) return;
-      connecting = true; disconnectInput(); setStatus(attempt ? 'Reconnecting' : 'Connecting');
+      if (disposed || connecting || !reconnectAllowed || (session.current && session.current.socket.readyState !== WebSocket.CLOSED)) return;
+      connecting = true; disconnectInput(); setRetryAt(undefined); setStatus(attempt ? 'Reconnecting' : 'Connecting');
       try {
         if (!credential.current) { dropCredential(); return; }
-        const res = await fetch('/api/info'); if (!res.ok) throw new Error();
+        const res = await fetch('/api/info', { signal: AbortSignal.timeout(10_000) }); if (!res.ok) throw new Error();
         const info = await res.json(); if (disposed) return;
-        if (info.serverId !== credential.current.serverId || !info.paired) { dropCredential(); return; }
+        if (info.serverId !== credential.current.serverId || !info.paired) {
+          setError(info.serverId !== credential.current.serverId
+            ? 'The server restarted or changed. Approve this browser locally again.'
+            : 'This device is no longer approved. On the computer, type pair to reopen pairing when no device is approved.');
+          dropCredential(); return;
+        }
         attach(openSession(credential.current.password, credential.current));
       } catch { if (!disposed) schedule(); }
       finally { connecting = false; }
@@ -156,14 +287,20 @@ export function App() {
     function schedule() {
       if (disposed || !reconnectAllowed) return;
       setStatus('Reconnecting'); clearTimeout(retry);
-      retry = setTimeout(() => { void connect(); }, Math.min(8000, 500 * 2 ** Math.min(attempt++, 4)));
+      const delay = Math.min(8000, 500 * 2 ** Math.min(attempt++, 4));
+      setRetryAt(Date.now() + delay);
+      retry = setTimeout(() => { void connect(); }, delay);
     }
     closed.current = code => {
       if (disposed) return;
-      disconnectInput();
+      disconnectInput(); finishOperation();
       if (code === 4000) { reconnectAllowed = false; setStatus('Already connected'); return; }
       if (code === 4001 || code === 1008) { dropCredential(); return; }
       schedule();
+    };
+    retryNow.current = () => {
+      if (disposed || !reconnectAllowed || connecting) return;
+      clearTimeout(retry); void connect();
     };
     const heartbeat = setInterval(() => {
       if (session.current?.socket.readyState !== WebSocket.OPEN) return;
@@ -176,12 +313,20 @@ export function App() {
       if (socket?.readyState === WebSocket.OPEN && Date.now() - lastPong > 30_000) session.current?.close();
       else if (!socket || socket.readyState === WebSocket.CLOSED) { clearTimeout(retry); void connect(); }
     };
-    document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake);
+    const offline = () => {
+      if (disposed || !reconnectAllowed) return;
+      // A WebSocket close handshake can stall while the browser is offline.
+      // Do not advertise Connected or leave controls enabled until onclose fires.
+      disconnectInput(); finishOperation(); setStatus('Reconnecting'); setRetryAt(undefined);
+      session.current?.close();
+    };
+    document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake); window.addEventListener('offline', offline);
     if (session.current) attach(session.current); else void connect();
     return () => {
-      disposed = true; closed.current = undefined; input.current = () => false;
+      disposed = true; closed.current = undefined; input.current = () => 'not-sent';
+      retryNow.current = () => {}; fitCurrent.current = () => {}; fleetRequest.current = () => {}; finishOperation();
       clearTimeout(retry); clearInterval(heartbeat); unsubscribe?.();
-      document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake);
+      document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('offline', offline);
       const old = session.current; session.current = undefined; old?.close();
       resize.disconnect(); dataListener.dispose(); term.dispose(); terminal.current = null;
     };
@@ -193,15 +338,34 @@ export function App() {
     catch { setError('Cannot start encrypted pairing'); setBusy(false); }
   }
   function unpair() {
-    if (!session.current?.send({ type: 'unpair' })) { setError('Reconnect or revoke locally on the computer before unpairing.'); return; }
-    credential.current = undefined; void forgetCredential().catch(() => {});
+    if (!window.confirm('Unpair this browser? Haze keeps running, but remote access will end and pairing stays closed. To reconnect, type pair on the computer and approve locally again.')) return;
+    try {
+      if (!session.current?.send({ type: 'unpair' })) throw new Error('Not sent');
+      credential.current = undefined; void forgetCredential().catch(() => {});
+    } catch { setError('Unpair was not confirmed. Reconnect or revoke locally on the computer.'); }
   }
   const connected = status === 'Connected';
-  const key = (data: string) => { if (input.current(data)) terminal.current?.focus(); };
+  const canOperate = ['Connected', 'Exited', 'Stopping'].includes(status);
+  const activeInstance = fleet?.instances.find(instance => instance.id === activeId);
+  const chosenProject = fleet?.projects.find(project => project.id === newProject);
+  const sharesCheckout = fleet?.instances.some(instance => instance.cwd === chosenProject?.cwd && instance.state !== 'exited') ?? false;
+  const key = (data: string) => { if (input.current(data) === 'queued') terminal.current?.focus(); };
   const submitDraft = (event: FormEvent) => {
     event.preventDefault(); if (!connected || !draft) return;
     if (new TextEncoder().encode(draft).byteLength > 64 * 1024 - 32) { setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.'); return; }
-    setError(''); terminal.current?.paste(draft); setDraft(''); terminal.current?.focus();
+    if (lastPaste.current?.text === draft && ['queued', 'partial'].includes(lastPaste.current.result)
+      && !window.confirm('This draft was already attempted. Delivery may have occurred. Inspect the terminal first. Paste it again?')) return;
+    setError(''); pasteResult.current = undefined; pasting.current = true;
+    try { terminal.current?.paste(draft); }
+    catch { pasteResult.current = 'partial'; setError('Paste delivery is uncertain. Inspect the terminal before retrying.'); }
+    finally { pasting.current = false; }
+    // xterm paste synchronously emits onData; TypeScript cannot see that callback write.
+    const result = (pasteResult.current as InputResult | undefined) ?? 'not-sent';
+    lastPaste.current = { text: draft, result }; currentDraft().lastPaste = lastPaste.current;
+    setPasteFeedback(result === 'queued'
+      ? 'Paste queued locally, not confirmed by Haze. Draft retained. Inspect the terminal, then tap Enter to submit.'
+      : 'Paste was not confirmed. Draft retained. Inspect the terminal before retrying; no automatic replay.');
+    if (result === 'queued') terminal.current?.focus();
   };
   if (paired === null) return <main className="pair-screen"><p role="status">Initializing encrypted connection…</p></main>;
   if (!paired) return <main className="pair-screen"><section className="pair-card">
@@ -224,20 +388,50 @@ export function App() {
     </>}
     {busy && <button onClick={() => session.current?.close()}>Cancel pairing</button>}
     {error && <p role="alert" className="error">{error}</p>}
+    <details className="readiness"><summary>Before pairing</summary><ul><li>Keep the computer awake and haze-remote running.</li><li>Use the printed address on a trusted private network.</li><li>Have the computer’s local terminal available for code B and approve.</li></ul></details>
     <p className="fine-print">Terminal transport is encrypted. The HTTP-delivered page can still be modified by an active network attacker. Pair only on trusted networks. Approval grants your computer’s permissions.</p>
   </section></main>;
   return <main className="workspace">
     <header><div className="wordmark">haze<span> / remote</span></div><div className={`status ${connected ? 'live' : ''}`} role="status">{status}{status === 'Exited' ? ` (${exitCode ?? '?'})` : ''}</div><button onClick={unpair}>Unpair</button></header>
     <div className="session-meta"><span title={project}>{project || 'Authenticating approved device…'}</span><span>{pid ? `PID ${pid}` : 'PTY'}</span></div>
+    <div className="connection-meta">Host: {location.host} · {lastContact.current ? `Last authenticated contact ${Math.max(0, Math.floor((clock - lastContact.current) / 1000))}s ago` : 'Waiting for authenticated contact'}</div>
     {status === 'Already connected' && <div className="notice">This device is connected in another tab. Close that tab first. <button onClick={() => setEpoch(e => e + 1)}>Reconnect</button></div>}
-    {status === 'Reconnecting' && <div className="notice">Connection lost. Haze keeps running. Re-authenticating and reconnecting…</div>}
+    {status === 'Reconnecting' && <div className="notice">Connection lost. Disconnecting the browser does not stop Haze. Check that the host is awake, haze-remote is running, and the network is reachable. {retryAt ? `Retry in ${Math.max(0, Math.ceil((retryAt - clock) / 1000))}s.` : 'Re-authenticating…'} <button onClick={() => retryNow.current()}>Retry now</button></div>}
     {status === 'Exited' && <div className="notice">Haze exited. Recent output is available until haze-remote stops.</div>}
     {error && <div className="error" role="alert">{error}</div>}
+    <div className="fleet-navigation">
+      <nav className="fleet-tabs" role="tablist" aria-label="Haze instances">{fleet?.instances.map(instance => <button key={instance.id} role="tab" id={`tab-${instance.id}`} aria-controls="fleet-terminal" aria-selected={activeId === instance.id} tabIndex={activeId === instance.id ? 0 : -1} disabled={!canOperate || !!operation} onKeyDown={event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !fleet) return;
+        event.preventDefault(); const index = fleet.instances.findIndex(item => item.id === instance.id);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? fleet.instances.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + fleet.instances.length) % fleet.instances.length;
+        const target = fleet.instances[next]; command({ type: 'instance-select', instanceId: target.id });
+        document.getElementById(`tab-${target.id}`)?.focus();
+      }} onClick={() => { if (instance.id !== activeId) command({ type: 'instance-select', instanceId: instance.id }); }}><strong>{instance.name}</strong><small>{instance.state}{instance.exit ? ` (${instance.exit.exitCode})` : ''}{instance.id !== activeId && (instance.lastActivity ?? 0) > (seen.current.get(instance.id) ?? instance.createdAt) ? ' · New output' : ''}</small></button>)}</nav>
+      <button disabled={!canOperate || !!operation || !fleet || fleet.instances.length >= fleet.limit} onClick={() => { setNewName(`Haze ${(fleet?.instances.length ?? 0) + 1}`); setNewProject(activeInstance?.projectId ?? fleet?.projects[0]?.id ?? ''); setAllowShared(false); setShowCreate(true); }}>New instance</button>
+      <button aria-expanded={sidebarOpen} aria-controls="subagent-panel" onClick={() => setSidebarOpen(open => !open)}>Subagents</button>
+    </div>
+    {showCreate && <section className="new-instance" aria-label="Create Haze instance"><form onSubmit={event => { event.preventDefault(); command({ type: 'instance-create', name: newName, projectId: newProject, allowShared: sharesCheckout && allowShared }); }}>
+      <label>Instance name<input aria-label="Instance name" value={newName} onChange={event => setNewName(event.target.value)} maxLength={80} required disabled={!!operation} /></label>
+      <label>Approved project<select aria-label="Approved project" value={newProject} onChange={event => { setNewProject(event.target.value); setAllowShared(false); }} disabled={!!operation}>{fleet?.projects.map(project => <option key={project.id} value={project.id}>{project.name} — {project.cwd}</option>)}</select></label>
+      {sharesCheckout && <label className="check-row"><input type="checkbox" aria-label="Allow shared checkout" checked={allowShared} onChange={event => setAllowShared(event.target.checked)} disabled={!!operation} />Allow shared checkout. These instances can edit the same files; use separate locally approved worktrees for independent writers.</label>}
+      <button className="primary" type="submit" disabled={!canOperate || !!operation || !newName.trim() || (sharesCheckout && !allowShared)}>{operation === 'instance-create' ? 'Starting…' : 'Start Haze'}</button><button type="button" disabled={!!operation} onClick={() => setShowCreate(false)}>Cancel</button>
+    </form></section>}
+    <div className={`fleet-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
+    <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} onLink={sessionId => command({ type: 'subagents-link', instanceId: activeId, sessionId })} onUnlink={() => command({ type: 'subagents-unlink', instanceId: activeId })} /></div>
+    <section id="fleet-terminal" className="terminal-pane" role="tabpanel" aria-labelledby={activeId ? `tab-${activeId}` : undefined}>
+    <div className="instance-actions"><span>{activeInstance?.name ?? 'Loading fleet…'} · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running processes</span>{activeInstance?.state === 'exited' ? <button disabled={!canOperate || !!operation || (fleet?.instances.length ?? 0) < 2} onClick={() => command({ type: 'instance-close', instanceId: activeId })}>Close tab</button> : <button disabled={!canOperate || !!operation || activeInstance?.state !== 'running'} onClick={() => { if (window.confirm(`Stop ${activeInstance?.name}? Its Haze process will terminate. Other instances keep running. Recent output remains until you close this tab.`)) command({ type: 'instance-stop', instanceId: activeId }); }}>Stop instance</button>}</div>
+    {status === 'Switching' && <p className="notice">Restoring instance screen. Input is disabled until its snapshot is ready.</p>}
+    <div className="terminal-tools" aria-label="Terminal readability"><button disabled={fontSize <= 12} onClick={() => setFontSize(size => Math.max(12, size - 2))} aria-label="Smaller terminal text">A−</button><span>{fontSize}px</span><button disabled={fontSize >= 24} onClick={() => setFontSize(size => Math.min(24, size + 2))} aria-label="Larger terminal text">A+</button><button onClick={() => terminal.current?.scrollToBottom()}>Latest output</button></div>
     <div className="terminal" ref={host} aria-label="Haze terminal" />
     <nav className="keys" aria-label="Terminal keys"><button disabled={!connected} onClick={() => terminal.current?.focus()}>Keyboard</button>
       {([['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['Enter', '\r'], ['Ctrl+C', '\x03']] as const).map(([label, data]) => <button key={label} disabled={!connected} aria-label={label} onClick={() => key(data)}>{label}</button>)}
     </nav>
-    <form className="composer" onSubmit={submitDraft}><textarea aria-label="Message to Haze" placeholder="Write a prompt, paste it, then tap Enter to submit…" value={draft} onChange={e => setDraft(e.target.value)} rows={2} autoCapitalize="none" spellCheck={false} /><button className="primary" disabled={!connected || !draft} type="submit">Paste</button></form>
+    <div className="draft-tools"><label>Quick instruction <select aria-label="Quick instruction" value="" onChange={event => {
+      if (event.target.value) { setDraft(text => text ? `${text}\n\n${event.target.value}` : event.target.value); setPasteFeedback('Instruction added to draft only. Edit it, then Paste and Enter when ready.'); }
+    }}><option value="">Add to draft…</option><option value="Summarize your progress, remaining work, and any blockers.">Check progress</option><option value="Run the relevant tests and report any failures before continuing.">Verify the work</option><option value="Stop making edits and explain the current approach and risks.">Review the approach</option><option value="/help">Haze help (/help)</option></select></label><button onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? 'Compact composer' : 'Expand composer'}</button><button disabled={!draft} onClick={() => { setDraft(''); lastPaste.current = undefined; currentDraft().lastPaste = undefined; setPasteFeedback('Draft cleared.'); }}>Clear draft</button></div>
+    <form className={`composer ${expanded ? 'expanded' : ''}`} onSubmit={submitDraft}><textarea aria-label="Message to Haze" placeholder="Write a prompt, paste it, then tap Enter to submit…" value={draft} disabled={status === 'Switching'} onChange={e => { setDraft(e.target.value); setPasteFeedback(''); }} rows={expanded ? 5 : 2} autoCapitalize="none" spellCheck={false} /><button className="primary" disabled={!connected || !draft} title="Paste without submitting" type="submit">Paste</button></form>
+    <div className="composer-feedback" aria-live="polite">{pasteFeedback || 'Draft stays in this page only. Paste does not submit; use Enter when ready.'}</div>
     <footer>Encrypted terminal transport · Input never queued offline · Haze remains on your computer</footer>
+    </section></div>
   </main>;
 }

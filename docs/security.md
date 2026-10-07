@@ -55,6 +55,20 @@ At most 16 WebSockets are admitted at once; pre-handshake sockets expire in 10 s
 
 The only public JSON API is `/api/info`, exposing a random server-instance identifier and pairing/occupied flags—not PINs, project path, PID, credentials or terminal content. Legacy cookie/pair/logout/session APIs and network approval/revocation endpoints do not exist. Unpair is authenticated inside the encrypted channel; local revoke removes all authority immediately. Neither operation stops Haze or reopens pairing. Static serving is confined to compiled application assets, not the project directory.
 
+## Fleet ownership and subagent metadata
+
+One approved controller manages up to eight server-owned PTYs. Fleet inventories, project paths, lifecycle commands, snapshots, and worker metadata stay inside the authenticated encrypted channel. No public fleet, session-file, or Git review API is served. Local startup selects the installed executable and allowed project directories; remote launches cannot supply arbitrary executables, arguments, or cwd paths. This is a UI launch restriction, not an OS sandbox.
+
+Each terminal snapshot names a stable instance ID and fresh view token. Input/resize must match the selected instance/token; stale selections are rejected. Legacy messages without IDs can control only the initial instance while it is selected. Switching gates input until the correct framebuffer is restored. Successful/pending launch request IDs are retained (bounded to 256); exhaustion refuses new launches rather than evicting IDs and risking duplicate processes. Failed launches release their deduplication entry. Authority is rechecked after asynchronous directory validation before spawning.
+
+A shared checkout requires explicit acknowledgement. Stop targets one PTY; close removes only an exited tab and its in-memory screen/draft, not project files. Server shutdown stops all owned instances. Browser disconnect/revocation does not stop them. Process lifetime labels and recent output are not inferred agent/task completion.
+
+Subagent telemetry is optional and explicitly user-linked. Reads are confined to `HOME/.haze/sessions/<cwd-hash>/<validated-id>.jsonl`, with matching header ID/cwd, symlink-directory/file rejection, bounded incremental reads (256 KiB per poll), 64 KiB record bounds, and at most 100 retained worker rows per instance. Only known lifecycle enums, IDs, mode, timestamps, and duration fields are constructed into responses; prompts, transcripts, and tool output are not forwarded. This reader is not a secret scanner and session files themselves contain conversation data. Linking does not prove PTY ownership; the user must supply the selected Haze's `/session` ID. A session cannot be linked to two instances in the same cwd simultaneously.
+
+Readers poll locally even when the browser is disconnected, retain bounded metadata in RAM, and stop on unlink/parent exit/server shutdown. Replacement/truncation/disappearance resets reader state. A truncate-and-regrow rewrite between polls can evade detection. There is no worker process/terminal-control API and no parsing of ANSI output into fictional worker states.
+
+Drafts and paste feedback are scoped per instance in browser memory, not persisted across reload. Font size alone is stored as a local preference. Failed/partial paste retains the draft and is never replayed automatically. Local enqueue feedback does not promise PTY receipt. A failed encrypted write closes the connection rather than reusing an advanced secretstream state.
+
 ## Verification and remaining work
 
 Automated tests exercise PAKE mismatch, expiry, fixed cross-rotation budgets, local review/approval separation, zero terminal access before approval, one-device/tab restrictions, revocation and reconnect, ciphertext confidentiality markers, plaintext rejection, modified/replayed/reflected frames, and actual PTY behavior. Browser tests exercise Chromium and WebKit on non-secure LAN HTTP when an interface is available. Package tests exercise the installed CLI in a real local PTY with keyboard approval. Installed-Haze tests use isolated empty HOME/workspaces without model calls.

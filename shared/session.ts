@@ -105,8 +105,14 @@ export class ClientSession {
   }
   send(message: unknown) {
     if (!this.authorized || !this.channel || this.socket.readyState !== 1 || this.socket.bufferedAmount > 256 * 1024) return false;
-    this.socket.send(JSON.stringify(this.channel.seal(message)));
-    return true;
+    try {
+      this.socket.send(JSON.stringify(this.channel.seal(message)));
+      return true;
+    } catch (error) {
+      // Sealing advances stream state; a failed write cannot reuse that stream.
+      this.socket.close();
+      throw error;
+    }
   }
   close() { this.socket.close(); }
 }

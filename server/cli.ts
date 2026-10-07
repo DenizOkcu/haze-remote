@@ -16,6 +16,7 @@ async function main() {
     host: { type: 'string' }, lan: { type: 'boolean' },
     port: { type: 'string', default: '8787' }, cwd: { type: 'string', default: process.cwd() },
     haze: { type: 'string', default: 'haze' },
+    project: { type: 'string', multiple: true },
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' },
   } });
   if (parsed.values.help) {
@@ -27,6 +28,7 @@ Usage: haze-remote [options] [-- <Haze arguments>]
   --port <number>  HTTP port (default: 8787; 0 selects a free port)
   --cwd <path>     Project directory (default: current directory)
   --haze <path>    Haze executable (default: haze on PATH)
+  --project <path> Approve another project/worktree for new tabs (repeatable)
   -h, --help      Show help
   -v, --version   Show version
 
@@ -59,7 +61,8 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
   if (!executable) throw new Error(`Haze executable not found: ${command}. Install @denizokcu/haze or use --haze /path/to/haze.`);
   console.log('\nhaze-remote: terminal content will be encrypted. The HTTP-delivered application is NOT protected against active network interception.\nPair only on trusted networks. Local approval grants your OS user’s coding-agent permissions.');
   const remote = await startRemote({ host, port, cwd: resolve(parsed.values.cwd!), executable,
-    args: split < 0 ? [] : args.slice(split + 1), assets: fileURLToPath(new URL('../client/', import.meta.url)),
+    args: split < 0 ? [] : args.slice(split + 1), newArgs: [],
+    projects: (parsed.values.project ?? []).map(path => ({ cwd: resolve(path), name: path.split('/').filter(Boolean).at(-1) ?? 'Project' })), assets: fileURLToPath(new URL('../client/', import.meta.url)),
     onPin(pin) {
       console.log(pin ? `\nPIN A: ${pin.pin} · expires ${new Date(pin.expiresAt).toLocaleTimeString()} (${PIN_MS / 1000} seconds). Enter it in the browser.` : '\nPairing closed. Use "pair" to reopen when no device is paired.');
     },
@@ -99,6 +102,6 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
   local.on('close', () => { if (!closing) void shutdown(); });
   process.once('SIGINT', () => { void shutdown(); });
   process.once('SIGTERM', () => { void shutdown(); });
-  void remote.exited.then(() => console.log('Haze exited. Its recent output remains available until haze-remote stops.'));
+  void remote.exited.then(() => console.log('Initial Haze instance exited. Other instances continue; its recent output remains available in its tab.'));
 }
 main().catch(error => { console.error(`haze-remote: ${error.message}`); process.exitCode = 1; });

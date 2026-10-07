@@ -49,3 +49,21 @@ node-pty's installed macOS prebuilt `spawn-helper` arrived with mode 0644, causi
 ## Coverage boundaries
 
 No authenticated model request was sent, no user configuration or credentials were read, and no model/provider behavior was duplicated. Linux/native builds and real tablet sleep, virtual keyboard, and Wi-Fi behavior still need hardware testing. Persistence lasts only while haze-remote and its Haze child continue running; the computer must stay awake. Recent screen/history is bounded to 2,000 lines and is not stored on disk.
+
+## Historical cockpit/Git review verification (2026-10-07; review subsequently removed)
+
+The subsequent single-session cockpit/review implementation passed `npm run typecheck`, all **14** unit/protocol/PTY/Git tests, `npm run build`, and all **12** tablet-browser cases in Chromium/WebKit with installed-Haze coverage enabled. Installed Haze still ran with an isolated temporary HOME/workspace and no model calls. `git diff --check` also passed.
+
+New interactions cover failed/partial paste recovery, retained in-page drafts, duplicate-paste confirmation, no reconnect replay, quick instructions that do not execute, readability preferences, narrow-screen layout, retry, canceled Unpair, read-only real Git diffs, feedback-to-draft, review recovery, and non-Git fallback. Server/Git checks cover encrypted approved-only review, revoked responses, concurrency bounds, path/credential exclusions, disabled clean filters, ignored Git environment redirection, staged/unstaged/unborn baselines, binary/rename behavior, and output limits.
+
+Vite retains its non-failing 500 kB chunk-size warning (approximately 473 kB gzipped JavaScript). Linux and physical-tablet keyboard/sleep/Wi-Fi coverage remain outstanding; simulated tablet browser checks are not physical-device validation. That historical release added no semantic Haze event API, multiple-agent lifecycle, or HTTPS deployment support. The subsequent fleet replaces Git review; see [fleet/subagent integration evidence](fleet-and-subagents.md).
+
+## Fleet release verification (2026-10-07)
+
+The fleet replacement passed TypeScript checks, all **22** unit/protocol/PTY/fleet/subagent-reader tests, production build and package smoke, and all **14** Chromium/WebKit browser cases with installed-Haze coverage enabled. The package check verifies new fleet/reader modules are included and removed Git-review modules are absent from compiled artifacts. `git diff --check` passed.
+
+Native Haze browser interactions launch two independent Haze PTYs, exercise `/help` in both, switch screens, and exit one while the other remains alive. Other browser cases cover per-instance drafts/input, reload/reconnect without duplicate launch, confirmed/canceled stop, tab removal, keyboard tab selection, real-schema linked worker metadata, quarantine/settlement, parent-specific sidebar contents, unlinking, and narrow-screen drawer behavior. The empty HOME assertion checks Haze's provider-configuration report rather than a footer label that can be truncated at narrow terminal widths.
+
+Subagent schemas were verified against public Haze **v1.5.0** source; lifecycle streaming checks use synthetic temporary session files, not real user data or authenticated provider calls. Automatic PTY/session association and a provider-backed worker run remain unverified. See [fleet/subagent integration evidence](fleet-and-subagents.md) for the explicit linking contract and source references. Linux and physical-device validation remain outstanding; HTTPS and persistent fleet ownership across server restarts are not implemented.
+
+A follow-up browser run exposed an offline-state race: a native WebSocket close handshake could stall while the UI still said Connected. The browser's offline event now disables input immediately and marks the connection Reconnecting, without replaying requests. After that fix, the production build and default browser suite passed (**10 passed, 4 installed-Haze cases skipped** because the executable opt-in was not set). The earlier installed-Haze-enabled run above passed all 14; it predates this offline-state fix.
