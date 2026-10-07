@@ -13,14 +13,15 @@ test('fleet request validation does not offer arbitrary paths, executables or in
   assert.ok(isFleetRequest({ type: 'instance-create', requestId: '1', name: 'Audit', projectId: 'project-1', allowShared: false }));
   assert.ok(!isFleetRequest({ type: 'instance-create', requestId: '1', name: 'Audit\n', projectId: 'project-1', allowShared: false }));
   assert.ok(!isFleetRequest({ type: 'instance-create', requestId: '1', name: 'Audit', projectId: '../outside', allowShared: false }));
-  assert.ok(!isFleetRequest({ type: 'subagents-link', requestId: '1', instanceId: 'id', sessionId: '../secret' }));
+  assert.ok(!isFleetRequest({ type: 'worker-watch', requestId: '1', instanceId: 'id', workerKey: 'bad key' }));
+  assert.ok(isFleetRequest({ type: 'worker-watch', requestId: '1', instanceId: 'id', workerKey: 'abc:1:2' }));
 });
 async function fixture() {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'haze-fleet-')));
   const cwd = join(home, 'primary'), second = join(home, 'second');
   await mkdir(cwd); await mkdir(second);
   const remote = await startRemote({ host: '127.0.0.1', port: 0, cwd, projects: [{ cwd: second, name: 'Other worktree' }],
-    executable: process.execPath, args: [resolve('tests/fixtures/agent.mjs')], newArgs: [resolve('tests/fixtures/agent.mjs')], assets: resolve('tests/fixtures'),
+    executable: process.execPath, args: [resolve('tests/fixtures/observed-agent.mjs')], newArgs: [resolve('tests/fixtures/observed-agent.mjs')], assets: resolve('tests/fixtures'),
     env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
   return { home, cwd, second, remote, origin: `http://127.0.0.1:${remote.port}`,
     async cleanup() { await remote.close(); await rm(home, { recursive: true, force: true }); } };
@@ -31,7 +32,12 @@ async function approve(f: Awaited<ReturnType<typeof fixture>>) {
   await until(() => !!c.state.code);
   assert.equal(c.session.send({ type: 'instance-create', requestId: 'unapproved', name: 'Denied', projectId: 'project-1', allowShared: true }), false);
   assert.equal(c.messages.length, 0);
-  f.remote.local.approve(f.remote.local.confirm(c.state.code!).id);
+  // Under parallel-suite load the review enrollment message can trail the code; without it
+  // confirm() throws ("enrollment is not ready"), so wait for enrollment before confirming.
+  await until(() => {
+    try { f.remote.local.approve(f.remote.local.confirm(c.state.code!).id); return true; }
+    catch { return false; }
+  });
   await until(() => !!latestSnapshot(c));
   return c;
 }
@@ -77,7 +83,15 @@ test('fleet instances have isolated PTYs, scoped input/resize, idempotent creati
     second.viewId = latestSnapshot(c).viewId;
     c.session.send({ type: 'input', instanceId: second.instanceId, viewId: second.viewId, data: 'ONLY-SECOND' });
     c.session.send({ type: 'resize', instanceId: second.instanceId, viewId: second.viewId, cols: 80, rows: 20 });
-    await until(() => c.output().includes('ONLY-SECOND') && c.output().includes('SIZE 80x20'));
+    // macOS can drop a PTY resize notification under load, and the server no-ops a resize
+    // to the current size. Alternate dimensions so every send is a real winsize change and
+    // retry until the child acknowledges; finish on 80x20.
+    for (let attempts = 0; attempts < 10 && !c.output().includes('SIZE 80x20'); attempts++) {
+      const [cols, rows] = attempts % 2 ? [80, 20] : [81, 21];
+      c.session.send({ type: 'resize', instanceId: second.instanceId, viewId: second.viewId, cols, rows });
+      await until(() => c.output().includes(`SIZE ${cols}x${rows}`), 3000).catch(() => {});
+    }
+    await until(() => c.output().includes('ONLY-SECOND') && c.output().includes('SIZE 80x20'), 20000);
     c.session.send({ type: 'instance-select', requestId: 'back', instanceId: primary.instanceId });
     await until(() => latestSnapshot(c)?.requestId === 'back');
     assert.ok(latestSnapshot(c).data.includes('ONLY-PRIMARY'));
@@ -125,27 +139,55 @@ test('fleet cap and shutdown bound all instances; running tabs cannot be closed'
   } finally { c?.ws.terminate(); await f.cleanup(); }
 });
 
-test('subagent sidebar data uses explicitly linked Haze records, never prompts or cross-instance ownership guesses', { timeout: 20000 }, async () => {
+test('observed subagents appear automatically, stream, finish, and stay inspectable without watching or plaintext leaks', { timeout: 30000 }, async () => {
   const f = await fixture(); let c: Awaited<ReturnType<typeof connection>> | undefined;
   try {
     c = await approve(f);
-    const snapshot = latestSnapshot(c);
-    const directory = join(f.home, '.haze', 'sessions', createHash('sha256').update(snapshot.cwd).digest('hex').slice(0, 16));
-    await mkdir(directory, { recursive: true });
-    const event = (name: string, inner: any) => JSON.stringify({ type: 'event', name, text: JSON.stringify(inner), at: '2026-10-07T12:00:00Z' }) + '\n';
-    await writeFile(join(directory, 'linked.jsonl'), JSON.stringify({ type: 'header', id: 'linked', cwd: snapshot.cwd }) + '\n'
-      + event('goal_start', { request: 'synthetic-private-prompt' })
-      + event('subagent_state', { type: 'subagent_state', id: 'worker-1', mode: 'inspect', state: 'started', running: 1, at: '2026-10-07T12:00:00Z', prompt: 'synthetic-private-prompt' }));
-    c.session.send({ type: 'subagents-link', requestId: 'link', instanceId: snapshot.instanceId, sessionId: 'linked' });
-    await until(() => c!.messages.some(m => m.type === 'fleet' && m.fleet.instances[0].subagents.status === 'live'));
-    const feed = c.messages.filter(m => m.type === 'fleet').at(-1).fleet.instances[0].subagents;
-    assert.equal(feed.workers[0].id, 'worker-1'); assert.equal(feed.workers[0].state, 'started');
-    assert.ok(!JSON.stringify(c.messages).includes('synthetic-private-prompt'));
-    assert.ok(c.wire.every(frame => !frame.includes('worker-1') && !frame.includes(snapshot.cwd)));
-    c.session.send({ type: 'subagents-unlink', requestId: 'unlink', instanceId: snapshot.instanceId });
-    await until(() => c!.messages.some(m => m.type === 'fleet-result' && m.requestId === 'unlink'));
-    assert.equal(c.messages.filter(m => m.type === 'fleet').at(-1).fleet.instances[0].subagents.status, 'unlinked');
-    await delay(1100);
-    assert.deepEqual(c.messages.filter(m => m.type === 'fleet').at(-1).fleet.instances[0].subagents.workers, []);
+    const instance = latestSnapshot(c).instanceId;
+    // Observer events can land before approval; the snapshot fleet carries them.
+    const fleetStates = () => [...c!.messages.filter(m => m.type === 'fleet').map(m => m.fleet.instances[0].subagents),
+      ...c!.messages.filter(m => m.type === 'snapshot').map(m => m.fleet?.instances[0]?.subagents)].filter(Boolean);
+    await until(() => fleetStates().some(s => s.status === 'observing'));
+    await until(() => fleetStates().some(s => s.workers?.length === 1));
+    const worker = fleetStates().find(s => s.workers?.length)?.workers?.[0];
+    assert.ok(worker, 'worker run present');
+    assert.equal(worker.id, 'worker-1');
+    // The synthetic run may settle before pairing completes; identity and appearance are what this
+    // stage guarantees. Active-then-settled sequencing is covered by the haze-observer unit tests.
+    assert.ok(['queued', 'started', 'terminal', 'settled'].includes(worker.state), `unexpected worker state ${worker.state}`);
+    assert.equal(worker.objective, 'Audit the payment module');
+    assert.ok(!c.messages.some(m => m.type === 'subagent-output'), 'Output stays private until a run is inspected');
+    c.session.send({ type: 'worker-watch', requestId: 'watch', instanceId: instance, workerKey: worker.key });
+    await until(() => c!.messages.some(m => m.type === 'subagent-output' && m.output.includes('streamed chunk')));
+    let frame = c.messages.filter(m => m.type === 'subagent-output').at(-1);
+    assert.ok(frame.revision > 0);
+    await until(() => c!.messages.some(m => m.type === 'subagent-output' && m.result === 'Audit complete: 2 findings, both fixed.'));
+    await until(() => fleetStates().some(s => s.workers?.[0]?.state === 'settled'));
+    const finished = fleetStates().find(s => s.workers?.[0]?.state === 'settled')?.workers?.[0];
+    assert.ok(finished, 'settled run present');
+    assert.equal(finished.state, 'settled'); assert.equal(finished.termination, 'completed');
+    // Finished runs remain inspectable with their full retained output.
+    const last = c.messages.filter(m => m.type === 'subagent-output').at(-1);
+    assert.ok(last.output.includes('streamed chunk')); assert.ok(last.truncated === false);
+    c.session.send({ type: 'worker-unwatch', requestId: 'unwatch', instanceId: instance });
+    await until(() => c!.messages.some(m => m.type === 'fleet-result' && m.requestId === 'unwatch'));
+    assert.ok(c.wire.every(frame => !frame.includes('synthetic-session') && !frame.includes(f.cwd)));
+  } finally { c?.ws.terminate(); await f.cleanup(); }
+});
+
+test('fleet observer status is reported and never disturbs terminal control', { timeout: 30000 }, async () => {
+  const f = await fixture(); let c: Awaited<ReturnType<typeof connection>> | undefined;
+  try {
+    c = await approve(f);
+    const instance = latestSnapshot(c).instanceId;
+    // Status arrives either in the snapshot fleet or via a later fleet update.
+    await until(() => {
+      const states = [...c!.messages.filter(m => m.type === 'fleet').map(m => m.fleet.instances[0].subagents.status),
+        latestSnapshot(c!)?.fleet.instances[0].subagents.status];
+      return states.includes('observing') || states.includes('unsupported');
+    });
+    c.session.send({ type: 'instance-stop', requestId: 'stop', instanceId: instance });
+    await until(() => c!.messages.some(m => m.type === 'fleet-result' && m.requestId === 'stop'));
+    await until(() => latestSnapshot(c!)?.fleet.instances[0].state !== 'running' || c!.messages.some(m => m.type === 'exit'));
   } finally { c?.ws.terminate(); await f.cleanup(); }
 });

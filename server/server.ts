@@ -92,8 +92,8 @@ export async function startRemote(options: RemoteOptions) {
           else if (message.type === 'instance-close') {
             fleet.remove(message.instanceId);
             if (selection?.id === message.instanceId) await show(ws, fleet.first()!.id);
-          } else if (message.type === 'subagents-link') await fleet.link(message.instanceId, message.sessionId);
-          else fleet.unlink(message.instanceId);
+          } else if (message.type === 'worker-watch') fleet.watch(message.instanceId, message.workerKey!);
+          else fleet.unwatch(message.instanceId);
           if (access.isActive(ws)) send(ws, { type: 'fleet-result', requestId: message.requestId });
         } catch (error) {
           if (access.isActive(ws)) send(ws, { type: 'fleet-error', requestId: message.requestId,
@@ -110,7 +110,7 @@ export async function startRemote(options: RemoteOptions) {
     const snapshot = await fleet.snapshot(id);
     if (stopped || !access.isActive(ws) || selection !== next) return;
     send(ws, { type: 'snapshot', ...snapshot, instanceId: id, viewId: next.viewId, requestId,
-      capabilities: { fleet: 1, subagents: 'session-v1' }, fleet: fleet.state() });
+      capabilities: { fleet: 1, subagents: 'observed-v1' }, fleet: fleet.state() });
     next.ready = true;
   }
   function validHost(req: IncomingMessage) {
@@ -159,7 +159,7 @@ export async function startRemote(options: RemoteOptions) {
     onEvent(message) {
       if (!selection?.ready || !access.isActive(selection.ws)) return;
       if (message.type === 'fleet') send(selection.ws, message);
-      else if (message.instanceId === selection.id) send(selection.ws, { ...message, viewId: selection.viewId });
+      else if (message.instanceId === selection.id) send(selection.ws, message.type === 'subagent-output' ? { ...message } : { ...message, viewId: selection.viewId });
     },
   });
   let initial;

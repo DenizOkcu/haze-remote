@@ -8,7 +8,6 @@ Haze still owns models, tools, project files, configuration, and durable session
 
 The current direction is a fleet of Haze instances with a subagent sidebar. The Changes/Git review feature has been removed. Original Orca research and proposals are retained as historical context; [fleet usage](#fleet-of-haze-instances) and [subagent integration evidence](docs/fleet-and-subagents.md) describe the implementation.
 
-- [Orca analysis: how its UI supports agent steering](docs/orca-analysis.md)
 - [haze-remote product direction: UX, architecture, and boundaries](docs/haze-remote-product-direction.md)
 - [Value-first roadmap: quick wins, milestones, and acceptance criteria](docs/haze-remote-roadmap.md)
 
@@ -104,15 +103,14 @@ Project selection is not a sandbox: Haze retains your OS-user authority. There i
 
 ### Subagent sidebar
 
-The sidebar belongs to the selected parent instance. Haze workers are in-process agents, not separate PTYs. To show real lifecycle metadata:
+The sidebar sits to the right of the terminal and belongs to the selected parent instance. When Haze spawns subagents, they appear in the sidebar automatically — no linking step. Runs are grouped Running/Finished, and finished runs stay inspectable for the session's lifetime:
 
-1. In that Haze terminal, paste **`/session`**, then press **Enter**.
-2. Copy the displayed session ID into **Haze session ID** in the sidebar and choose **Link session**.
-3. See queued/started/terminal/settled workers, mode, timing, termination, and expandable details. **Quarantined** means execution may still be running even after a terminal result. **Unlink session** stops reading that feed.
+- Select a run to stream its text output and tool activity **live** while it runs, and to read its final deliverable and lifecycle details (mode, objective, queue/execution durations, termination, quarantined vs settled) afterwards.
+- Output history is retained server-side per run (bounded; older text is dropped past the limit and marked truncated). Inspecting a finished run replays everything retained — live watching is not required.
+- Only the inspected run's output is sent over the encrypted channel; unwatched runs expose lifecycle metadata only.
+- Subagents are in-process workers of their parent Haze, not separate terminals. There is no per-worker input, approval, or interrupt API — steer the parent Haze terminal.
 
-Linking is an explicit user association; the current Haze session header does not prove which PTY owns it. The adapter never guesses the newest session or counts OS children. If you use `/new` or `/resume`, relink the correct ID. `--no-session` cannot provide a feed; brand-new sessions may not exist on disk until Haze saves a resumable conversation.
-
-Only allowlisted lifecycle fields are forwarded. Prompts, tool output, provider configuration, and worker transcripts are not exposed by this adapter. Workers have no separate remote terminal or approval/interrupt API; steer their parent Haze. Session reads are scoped and bounded; see [integration details and limitations](docs/fleet-and-subagents.md).
+This works through a **version-pinned in-process observer**: each Haze instance is launched with a preload that instruments only `@denizokcu/haze` 1.5.0's compiled coordinator/stream modules in memory and reports session identity, worker lifecycle, streamed text-deltas, tool names, and final capsules over a private local socket. Installed Haze files are never modified. With any other Haze version or layout, the sidebar reports unsupported and the terminal keeps working unchanged. `--no-session` still gives worker runs, but session IDs report as ephemeral. Prompts are shown only as each worker's short objective; provider configuration and reasoning are never forwarded. See [observer design and limitations](docs/fleet-and-subagents.md).
 
 Git review is removed. Managed worktrees, multi-host routing, persistent fleet ownership across server restarts, HTTPS support, and cloud relay are not implemented.
 

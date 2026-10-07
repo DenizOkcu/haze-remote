@@ -58,6 +58,10 @@ New interactions cover failed/partial paste recovery, retained in-page drafts, d
 
 Vite retains its non-failing 500 kB chunk-size warning (approximately 473 kB gzipped JavaScript). Linux and physical-tablet keyboard/sleep/Wi-Fi coverage remain outstanding; simulated tablet browser checks are not physical-device validation. That historical release added no semantic Haze event API, multiple-agent lifecycle, or HTTPS deployment support. The subsequent fleet replaces Git review; see [fleet/subagent integration evidence](fleet-and-subagents.md).
 
+## Automatic subagent observation release (2026-10-07, later the same day)
+
+The manual session-link sidebar was replaced by an automatic in-process observer (see [fleet-and-subagents](fleet-and-subagents.md)): workers appear when spawned, stream text/tool output live while inspected, and remain inspectable after finishing. Real installed-Haze verification includes the compiled 1.5.0 AST anchors being unique and transformable, normal rendering, `/help` paste + Enter, clean `/exit` (exit code 0) under the preload, and two concurrent native instances where exiting one leaves the other running. Final validation: typecheck, **22/22** unit/integration tests, build, package smoke, and **14/14** browser tests in Chromium/WebKit with installed-Haze coverage enabled. Provider-backed worker execution with a configured model was not exercised.
+
 ## Fleet release verification (2026-10-07)
 
 The fleet replacement passed TypeScript checks, all **22** unit/protocol/PTY/fleet/subagent-reader tests, production build and package smoke, and all **14** Chromium/WebKit browser cases with installed-Haze coverage enabled. The package check verifies new fleet/reader modules are included and removed Git-review modules are absent from compiled artifacts. `git diff --check` passed.

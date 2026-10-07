@@ -64,9 +64,9 @@ select { min-height: 44px; min-width: 0; border: 1px solid #35404e; border-radiu
 .fleet-tabs button[aria-selected="true"] { background: #223c35; border-color: #a5dcc9; }
 .fleet-tabs strong, .fleet-tabs small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fleet-tabs strong { font-size: 13px; } .fleet-tabs small { font-size: 11px; color: #aebac9; margin-top: 5px; }
-.fleet-shell { flex: 1; display: flex; position: relative; min-height: 0; min-width: 0; }
-.terminal-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.sidebar-container { width: 270px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid #2b3440; background: #141c24; }
+.fleet-shell { flex: 1; display: flex; flex-direction: row-reverse; position: relative; min-height: 0; min-width: 0; }
+.terminal-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; position: relative; }
+.sidebar-container { width: 290px; flex-shrink: 0; overflow-y: auto; border-left: 1px solid #2b3440; background: #141c24; }
 .subagent-sidebar { padding: 14px; font-size: 12px; overflow-wrap: anywhere; }
 .subagent-sidebar > header { display: block; padding: 0 0 10px; }
 .subagent-sidebar h2 { font-size: 16px; margin: 0 0 8px; }
@@ -77,9 +77,20 @@ select { min-height: 44px; min-width: 0; border: 1px solid #35404e; border-radiu
 .worker-list { padding: 0; list-style: none; display: grid; gap: 6px; }
 .worker-list button { width: 100%; text-align: left; font-size: 12px; line-height: 1.5; }
 .worker-list button[aria-expanded="true"] { border-color: #a5dcc9; }
-.worker-details { border-top: 1px solid #35404e; padding-top: 8px; }
-.worker-details dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
-.worker-details dt { color: #8f9cac; } .worker-details dd { margin: 0; }
+.worker-meta { display: block; color: #aebac9; font-size: 11px; margin-top: 4px; }
+.worker-overlay { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; min-height: 0; background: #0d1218f2; border-block: 1px solid #2c4a40; }
+.worker-overlay header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 12px; }
+.worker-overlay-title { min-width: 0; }
+.worker-overlay-title strong { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-overlay header button { flex-shrink: 0; font-size: 12px; }
+.worker-overlay details[open] { max-height: 20dvh; overflow: auto; }
+.worker-overlay summary { color: #a5dcc9; cursor: pointer; font-size: 12px; padding: 0 12px 6px; }
+.worker-overlay details p { margin: 0 0 6px; padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.worker-overlay .transcript { flex: 1; min-height: 0; margin: 0 12px; overflow: auto; font: 12px/1.55 ui-monospace, monospace; background: #0d1218; border: 1px solid #35404e; border-radius: 8px; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.worker-overlay .transcript pre { margin: 0; font: inherit; }
+.worker-overlay .deliverable { color: #a5dcc9; border-top: 1px dashed #2c4a40; padding-top: 8px; margin-top: 8px; }
+.worker-note { color: #c9b458; margin: 6px 12px; }
+.worker-overlay footer { color: #8f9cac; font-size: 11px; padding: 6px 12px; }
 .instance-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; color: #aebac9; font-size: 12px; }
 .instance-actions span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .instance-actions button { font-size: 12px; white-space: nowrap; }
@@ -90,7 +101,7 @@ select { min-height: 44px; min-width: 0; border: 1px solid #35404e; border-radiu
 .new-instance .check-row { grid-column: 1 / -1; display: flex; align-items: flex-start; line-height: 1.5; }
 .check-row input { width: 20px; height: 20px; flex-shrink: 0; }
 @media (max-width: 760px) {
-  .sidebar-container { position: absolute; z-index: 2; inset: 0 auto 0 0; width: min(300px, 85vw); box-shadow: 16px 0 32px #0009; }
+  .sidebar-container { position: absolute; z-index: 2; inset: 0 0 0 auto; width: min(320px, 88vw); box-shadow: -16px 0 32px #0009; }
   .fleet-navigation { gap: 4px; } .fleet-tabs button { min-width: 105px; padding: 8px; }
   .fleet-navigation > button { padding: 6px; font-size: 11px; }
   .new-instance form { grid-template-columns: minmax(0, 1fr); }

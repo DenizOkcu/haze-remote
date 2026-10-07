@@ -5,8 +5,9 @@ import { ClientSession } from '../shared/session.js';
 import { CONFIRM_MS, REVIEW_MS, PIN_MS, type DeviceCredential } from '../shared/crypto.js';
 import { loadCredential, saveCredential, forgetCredential } from './credentials';
 import { sendTerminalInput, type InputResult } from './input';
-import { SubagentSidebar } from './SubagentSidebar';
+import { SubagentSidebar, SubagentOverlay } from './SubagentSidebar';
 import type { FleetState, FleetRequest } from '../shared/fleet.js';
+import type { WorkerOutput } from '../shared/observer.js';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
 type DraftMemory = { text: string; feedback: string; lastPaste?: { text: string; result: InputResult } };
@@ -35,6 +36,8 @@ export function App() {
   const [newProject, setNewProject] = useState('');
   const [allowShared, setAllowShared] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
+  const [watchedWorker, setWatchedWorker] = useState<string>();
+  const [workerOutput, setWorkerOutput] = useState<WorkerOutput>();
   const display = useRef<{ id: string; viewId: string }>({ id: '', viewId: '' });
   const draftMemory = useRef(new Map<string, DraftMemory>());
   const seen = useRef(new Map<string, number>());
@@ -77,7 +80,14 @@ export function App() {
     if (id && pendingOperation.current?.id !== id) return;
     clearTimeout(operationTimeout.current); pendingOperation.current = undefined; setOperation(undefined);
   }
+  const watchedWorkerRef = useRef<string | undefined>(undefined);
   const command = (request: FleetCommand) => fleetRequest.current({ ...request, requestId: requestId() });
+  function selectWorker(key?: string) {
+    // Keep any prior streaming view until the new selection's first frame arrives.
+    watchedWorkerRef.current = key;
+    setWatchedWorker(key);
+    command({ type: key ? 'worker-watch' : 'worker-unwatch', instanceId: display.current.id, ...(key ? { workerKey: key } : {}) });
+  }
 
   useEffect(() => {
     currentFontSize.current = fontSize;
@@ -214,7 +224,7 @@ export function App() {
       setDraft(''); setPasteFeedback(''); lastPaste.current = undefined;
       setProject(''); setPid(undefined); lastContact.current = undefined; setRetryAt(undefined);
       draftMemory.current.clear(); seen.current.clear(); display.current = { id: '', viewId: '' };
-      setFleet(undefined); setActiveId(''); setShowCreate(false); finishOperation();
+      setFleet(undefined); setActiveId(''); setShowCreate(false); setWatchedWorker(undefined); setWorkerOutput(undefined); finishOperation();
     };
     function attach(connection: ClientSession) {
       unsubscribe?.();
@@ -230,6 +240,7 @@ export function App() {
           const target = { id: message.instanceId, viewId: message.viewId }; display.current = target;
           const memory = currentDraft(); setDraftState(memory.text); setPasteFeedbackState(memory.feedback); lastPaste.current = memory.lastPaste;
           setActiveId(target.id); setFleet(message.fleet); seen.current.set(target.id, Date.now());
+          setWatchedWorker(undefined); setWorkerOutput(undefined);
           if (pending?.type === 'instance-create') setShowCreate(false);
           if (message.requestId) finishOperation(message.requestId);
           term.reset(); term.resize(message.cols, message.rows);
@@ -247,6 +258,8 @@ export function App() {
           if (message.instanceId === display.current.id && message.viewId === display.current.viewId) {
             processExited = true; term.options.disableStdin = true; setExitCode(message.exitCode); setStatus('Exited');
           }
+        } else if (message.type === 'subagent-output') {
+          if (message.instanceId === display.current.id && message.workerKey === watchedWorkerRef.current) setWorkerOutput(message);
         } else if (message.type === 'fleet') {
           setFleet(message.fleet);
           const active = message.fleet.instances.find((instance: any) => instance.id === display.current.id);
@@ -417,7 +430,7 @@ export function App() {
       <button className="primary" type="submit" disabled={!canOperate || !!operation || !newName.trim() || (sharesCheckout && !allowShared)}>{operation === 'instance-create' ? 'Starting…' : 'Start Haze'}</button><button type="button" disabled={!!operation} onClick={() => setShowCreate(false)}>Cancel</button>
     </form></section>}
     <div className={`fleet-shell ${sidebarOpen ? 'sidebar-open' : ''}`}>
-    <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} onLink={sessionId => command({ type: 'subagents-link', instanceId: activeId, sessionId })} onUnlink={() => command({ type: 'subagents-unlink', instanceId: activeId })} /></div>
+    <div id="subagent-panel" className="sidebar-container" hidden={!sidebarOpen}><SubagentSidebar instance={activeInstance} connected={canOperate} busy={!!operation} selectedKey={watchedWorker} output={workerOutput} onSelect={selectWorker} /></div>
     <section id="fleet-terminal" className="terminal-pane" role="tabpanel" aria-labelledby={activeId ? `tab-${activeId}` : undefined}>
     <div className="instance-actions"><span>{activeInstance?.name ?? 'Loading fleet…'} · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running processes</span>{activeInstance?.state === 'exited' ? <button disabled={!canOperate || !!operation || (fleet?.instances.length ?? 0) < 2} onClick={() => command({ type: 'instance-close', instanceId: activeId })}>Close tab</button> : <button disabled={!canOperate || !!operation || activeInstance?.state !== 'running'} onClick={() => { if (window.confirm(`Stop ${activeInstance?.name}? Its Haze process will terminate. Other instances keep running. Recent output remains until you close this tab.`)) command({ type: 'instance-stop', instanceId: activeId }); }}>Stop instance</button>}</div>
     {status === 'Switching' && <p className="notice">Restoring instance screen. Input is disabled until its snapshot is ready.</p>}
@@ -431,6 +444,7 @@ export function App() {
     }}><option value="">Add to draft…</option><option value="Summarize your progress, remaining work, and any blockers.">Check progress</option><option value="Run the relevant tests and report any failures before continuing.">Verify the work</option><option value="Stop making edits and explain the current approach and risks.">Review the approach</option><option value="/help">Haze help (/help)</option></select></label><button onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? 'Compact composer' : 'Expand composer'}</button><button disabled={!draft} onClick={() => { setDraft(''); lastPaste.current = undefined; currentDraft().lastPaste = undefined; setPasteFeedback('Draft cleared.'); }}>Clear draft</button></div>
     <form className={`composer ${expanded ? 'expanded' : ''}`} onSubmit={submitDraft}><textarea aria-label="Message to Haze" placeholder="Write a prompt, paste it, then tap Enter to submit…" value={draft} disabled={status === 'Switching'} onChange={e => { setDraft(e.target.value); setPasteFeedback(''); }} rows={expanded ? 5 : 2} autoCapitalize="none" spellCheck={false} /><button className="primary" disabled={!connected || !draft} title="Paste without submitting" type="submit">Paste</button></form>
     <div className="composer-feedback" aria-live="polite">{pasteFeedback || 'Draft stays in this page only. Paste does not submit; use Enter when ready.'}</div>
+    {(() => { const worker = activeInstance?.subagents?.workers?.find(item => item.key === watchedWorker); return worker ? <SubagentOverlay worker={worker} output={workerOutput} onClose={() => selectWorker(undefined)} /> : null; })()}
     <footer>Encrypted terminal transport · Input never queued offline · Haze remains on your computer</footer>
     </section></div>
   </main>;

@@ -10,7 +10,7 @@ Implementation lives in `client/App.tsx`, `client/SubagentSidebar.tsx`, `server/
 
 Automatic worktree management, session/PTY auto-association, worker terminals/control, multi-host routing, HTTPS/off-network deployment, Linux/device validation, and durable fleet ownership remain future work. The milestones below preserve the original proposal, not the current delivery order or complete Orca parity.
 
-Context: [Orca research](orca-analysis.md) · [product/UX/architecture direction](haze-remote-product-direction.md).
+Context: [product/UX/architecture direction](haze-remote-product-direction.md).
 
 ## How to read the priorities
 

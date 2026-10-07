@@ -1,12 +1,14 @@
-import { useEffect, useId, useState, type FormEvent } from 'react';
-import { validSessionId, type AgentInstance, type WorkerState } from '../shared/fleet.js';
+import { useEffect, useRef } from 'react';
+import type { AgentInstance, WorkerState } from '../shared/fleet.js';
 
+export type SubagentOutput = { output: string; result: string; truncated: boolean; revision: number };
 export type SubagentSidebarProps = {
   instance?: AgentInstance;
   connected: boolean;
   busy: boolean;
-  onLink: (id: string) => void;
-  onUnlink: () => void;
+  selectedKey?: string;
+  output?: SubagentOutput;
+  onSelect: (workerKey?: string) => void;
 };
 
 function isActive(worker: WorkerState): boolean {
@@ -14,44 +16,24 @@ function isActive(worker: WorkerState): boolean {
   if (worker.execution === 'settled') return false;
   return worker.state === 'queued' || worker.state === 'started';
 }
-
 function workerStatus(worker: WorkerState): string {
-  if (worker.execution === 'quarantined') return `${worker.state} · quarantined — still executing`;
-  if (worker.execution === 'settled') return `${worker.state} · execution settled`;
-  if (worker.state === 'terminal') return 'terminal · execution status not reported';
-  if (worker.state === 'settled') return 'settled';
-  return worker.state;
+  if (worker.execution === 'quarantined') return 'still executing (quarantined)';
+  if (worker.state === 'settled' || worker.execution === 'settled') return 'finished';
+  if (worker.state === 'terminal') return 'finished (settlement unconfirmed)';
+  return worker.state === 'started' ? 'running' : worker.state;
 }
-
 function duration(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
+function workerTitle(worker: WorkerState): string {
+  return worker.objective ? worker.objective.split('\n')[0].slice(0, 80) : `${worker.mode} subagent`;
+}
 
-export function SubagentSidebar({ instance, connected, busy, onLink, onUnlink }: SubagentSidebarProps) {
-  const [sessionId, setSessionId] = useState('');
-  const [selectedKey, setSelectedKey] = useState<string>();
-  const inputId = useId();
-  const helpId = useId();
-  const detailsId = useId();
+export function SubagentSidebar({ instance, connected, busy, selectedKey, onSelect }: SubagentSidebarProps) {
   const feed = instance?.subagents;
   const workers = feed?.workers ?? [];
   const active = workers.filter(isActive);
-  const inactive = workers.filter(worker => !isActive(worker));
-  const selected = workers.find(worker => worker.key === selectedKey);
-  const canChangeLink = Boolean(instance) && connected && !busy;
-  const canLink = canChangeLink && instance?.state === 'running';
-  const trimmedId = sessionId.trim();
-
-  useEffect(() => {
-    setSessionId('');
-    setSelectedKey(undefined);
-  }, [instance?.id, feed?.sessionId]);
-
-  function link(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canLink || !validSessionId(trimmedId)) return;
-    onLink(trimmedId);
-  }
+  const finished = workers.filter(worker => !isActive(worker));
 
   function workerGroup(label: string, group: WorkerState[]) {
     if (!group.length) return null;
@@ -63,11 +45,14 @@ export function SubagentSidebar({ instance, connected, busy, onLink, onUnlink }:
             <li key={worker.key}>
               <button
                 type="button"
-                aria-expanded={selectedKey === worker.key}
-                aria-controls={detailsId}
-                onClick={() => setSelectedKey(selectedKey === worker.key ? undefined : worker.key)}
+                aria-pressed={selectedKey === worker.key}
+                disabled={!connected || busy}
+                onClick={() => onSelect(selectedKey === worker.key ? undefined : worker.key)}
               >
-                <strong>{worker.id}</strong> · {worker.mode} · {workerStatus(worker)}
+                <strong>{workerTitle(worker)}</strong>
+                <span className="worker-meta">{worker.mode} · {workerStatus(worker)}
+                  {worker.termination ? ` · ${worker.termination}` : ''}
+                  {worker.durationMs !== undefined ? ` · ${duration(worker.durationMs)}` : ''}</span>
               </button>
             </li>
           ))}
@@ -80,63 +65,54 @@ export function SubagentSidebar({ instance, connected, busy, onLink, onUnlink }:
     <aside className="subagent-sidebar" aria-label="Subagents" aria-busy={busy}>
       <header>
         <h2>Subagents ({workers.length})</h2>
-        <p>Parent: {instance?.name ?? 'No Haze selected'}</p>
+        <p>Session: {instance?.name ?? 'No Haze selected'}</p>
       </header>
-      <p className="feed-status" aria-live="polite">Feed status: {feed?.status ?? 'unlinked'}</p>
-      {!instance && <p>Select a Haze instance to link its subagent feed.</p>}
-      {!connected && <p>Control unavailable. Displayed metadata may be stale; linking is unavailable until the instance is ready.</p>}
-      {feed?.status === 'loading' && <p>Loading linked session metadata.</p>}
-      {feed?.status === 'error' && <p>The linked session feed is unavailable. Check the session ID and try linking again.</p>}
-      {feed?.status === 'stopped' && <p>The feed has stopped. Displayed metadata is retained history, not a live execution view.</p>}
-      <p>Only reported worker metadata is shown; session history may be incomplete.</p>
-      {feed?.updatedAt !== undefined && <p>Last feed update: {new Date(feed.updatedAt).toLocaleString()}</p>}
-      {feed?.sessionId && <p>User-linked session ID: <code>{feed.sessionId}</code></p>}
-      <form onSubmit={link}>
-        <label htmlFor={inputId}>Haze session ID</label>
-        <input
-          id={inputId}
-          value={sessionId}
-          onChange={event => setSessionId(event.target.value)}
-          disabled={!canLink}
-          aria-describedby={helpId}
-          autoComplete="off"
-          autoCapitalize="none"
-          spellCheck={false}
-          maxLength={160}
-          required
-        />
-        <button type="submit" disabled={!canLink || !validSessionId(trimmedId)}>Link session</button>
-        <button type="button" disabled={!canChangeLink || !feed?.sessionId} onClick={onUnlink}>Unlink session</button>
-      </form>
-      <p id={helpId}>
-        Run <code>/session</code> in the selected Haze and enter its session ID here.
-        {' '}Linking is manual: there is no automatic PTY association or session discovery.
-        {' '}Subagent feeds are unavailable for Haze launched with <code>--no-session</code>.
-        {' '}IDs use letters, numbers, dots, underscores, or hyphens and start with a letter or number.
-      </p>
-      <p>Worker buttons reveal metadata only. No worker terminal or worker controls are available.</p>
-      {workers.length === 0 && <p>No worker metadata reported.</p>}
-      {workerGroup('Active workers', active)}
-      {workerGroup('Settled / other reported workers', inactive)}
-      <section id={detailsId} className="worker-details" hidden={!selected} aria-label="Worker details">
-        {selected && <>
-          <h3>Worker {selected.id}</h3>
-          <dl>
-            <dt>ID</dt><dd>{selected.id}</dd>
-            <dt>Scope</dt><dd>{selected.scope}</dd>
-            <dt>Mode</dt><dd>{selected.mode}</dd>
-            <dt>State</dt><dd>{selected.state}</dd>
-            <dt>Execution</dt><dd>{selected.execution ?? 'Not reported'}</dd>
-            <dt>Termination</dt><dd>{selected.termination ?? 'Not reported'}</dd>
-            <dt>Queue duration</dt><dd>{selected.queueMs === undefined ? 'Not reported' : duration(selected.queueMs)}</dd>
-            <dt>Execution duration</dt><dd>{selected.durationMs === undefined ? 'Not reported' : duration(selected.durationMs)}</dd>
-            <dt>Reported at</dt><dd>{selected.at}</dd>
-          </dl>
-          {selected.execution === 'quarantined' && <p>Quarantined execution is still executing, even if a terminal result was reported.</p>}
-          {selected.execution === 'settled' && <p>Execution has settled and is no longer executing.</p>}
-          {selected.state === 'terminal' && !selected.execution && <p>A terminal result alone does not confirm execution has settled.</p>}
-        </>}
-      </section>
+      <p className="feed-status" aria-live="polite">Observation: {feed?.status ?? 'off'}{feed?.sessionId ? ` · ${feed.sessionId}` : ''}</p>
+      {feed?.status === 'unsupported' && <p role="note">{feed.message ?? 'This Haze version or install does not support subagent observation.'} Terminal control is unaffected.</p>}
+      {feed?.status === 'off' && <p role="note">{feed.message ?? 'Waiting for Haze to report subagent activity.'}</p>}
+      {!instance && <p>Select a Haze instance to see its subagents.</p>}
+      {!connected && <p>Control unavailable. Displayed runs may be stale until reconnected.</p>}
+      {workers.length === 0 && <p>No subagent runs yet for this session.</p>}
+      {workerGroup('Running', active)}
+      {workerGroup('Finished', finished)}
+      <p>Selecting a run opens its live output over the terminal; the same view replays finished runs.</p>
     </aside>
+  );
+}
+
+/** Overlay over the session terminal: one transcript for live streaming and finished-run replay. */
+export function SubagentOverlay({ worker, output, onClose }: { worker: WorkerState; output?: SubagentOutput; onClose: () => void }) {
+  const transcript = useRef<HTMLDivElement>(null);
+  useEffect(() => { const el = transcript.current; if (el && isActive(worker)) el.scrollTop = el.scrollHeight; }, [output?.revision, worker.key]);
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [onClose]);
+  const result = output?.result?.trim() ?? '';
+  const streamed = output?.output?.trim() ?? '';
+  // The deliverable often repeats the streamed tail; show it once, appended to the same transcript.
+  const duplicateResult = !!result && !!streamed && streamed.endsWith(result);
+  return (
+    <section className="worker-overlay" role="region" aria-label="Subagent run">
+      <header>
+        <div className="worker-overlay-title">
+          <strong>{workerTitle(worker)}</strong>
+          <span className="worker-meta">{worker.id} · {worker.mode} · {workerStatus(worker)}
+            {worker.termination ? ` · ${worker.termination}` : ''}
+            {worker.queueMs !== undefined ? ` · queued ${duration(worker.queueMs)}` : ''}
+            {worker.durationMs !== undefined ? ` · ran ${duration(worker.durationMs)}` : ''}</span>
+        </div>
+        <button type="button" onClick={onClose}>Close (Esc)</button>
+      </header>
+      {worker.objective && <details className="worker-objective"><summary>Objective</summary><p>{worker.objective}</p></details>}
+      {worker.execution === 'quarantined' && <p className="worker-note">Quarantined execution may still be running despite a terminal result.</p>}
+      <div className="transcript" ref={transcript} tabIndex={0}>
+        <pre aria-label="Subagent output">{output?.output || (isActive(worker) ? '(streaming — no output yet)' : '(no output retained)')}</pre>
+        {result && !duplicateResult && <pre className="deliverable" aria-label="Subagent result">{'─'.repeat(3)} final deliverable {'\n'}{result}</pre>}
+      </div>
+      {output?.truncated && <p className="worker-note">Older output was dropped after the retention limit; the most recent text is shown.</p>}
+      <footer>Read-only observation; steer the parent Haze terminal instead.</footer>
+    </section>
   );
 }

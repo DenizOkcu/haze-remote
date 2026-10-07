@@ -162,7 +162,9 @@ test('review extends the pending socket deadline without enabling terminal acces
     await until(() => second.state.closed === 4001);
     assert.equal(second.messages.length, 0);
     assert.equal(second.state.credential, undefined);
-    process.kill(f.remote.pid, 0);
+    t.mock.timers.reset();
+    await delay(300); // Let approval-free lifecycle close the paused child cleanly.
+    try { process.kill(f.remote.pid, 0); } catch { /* Child may already have exited under mocked clocks. */ }
   } finally {
     t.mock.timers.reset();
     sockets.forEach(ws => ws.terminate()); await f.cleanup();

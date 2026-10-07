@@ -2,7 +2,7 @@
 
 Historical product proposal · **2026-10-07**. The user subsequently prioritized a fleet of Haze instances with tabs and a subagent sidebar, and asked to remove Git review. That fleet is now implemented; see [roadmap implementation status](haze-remote-roadmap.md#implementation-status), [current fleet usage](../README.md#fleet-of-haze-instances), and [subagent evidence](fleet-and-subagents.md). The inventory and review-first sequencing below describe the earlier baseline/proposal, not the current UI. Secure off-network deployment remains future work.
 
-Read first: [Orca findings](orca-analysis.md). Execution order: [prioritized roadmap](haze-remote-roadmap.md).
+Execution order: [prioritized roadmap](haze-remote-roadmap.md).
 
 ## Product promise
 
