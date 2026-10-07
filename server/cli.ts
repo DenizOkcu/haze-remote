@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+import { parseArgs } from 'node:util';
+import { resolve, delimiter, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { access } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { networkInterfaces } from 'node:os';
+import { createInterface } from 'node:readline';
+import { startRemote, privateAddress } from './server.js';
+
+async function main() {
+  const args = process.argv.slice(2);
+  const split = args.indexOf('--');
+  const parsed = parseArgs({ args: split < 0 ? args : args.slice(0, split), options: {
+    host: { type: 'string' }, lan: { type: 'boolean' },
+    port: { type: 'string', default: '8787' }, cwd: { type: 'string', default: process.cwd() },
+    haze: { type: 'string', default: 'haze' },
+    help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' },
+  } });
+  if (parsed.values.help) {
+    console.log(`haze-remote — locally approved, encrypted browser control of installed Haze
+
+Usage: haze-remote [options] [-- <Haze arguments>]
+  --lan            Bind to the sole private IPv4 LAN interface (otherwise use --host)
+  --host <address> Specific private/VPN or loopback IP (default: 127.0.0.1)
+  --port <number>  HTTP port (default: 8787; 0 selects a free port)
+  --cwd <path>     Project directory (default: current directory)
+  --haze <path>    Haze executable (default: haze on PATH)
+  -h, --help      Show help
+  -v, --version   Show version
+
+Example: haze-remote --lan -- --continue
+Requires a local interactive terminal for approval. Wildcard/public binds are disabled.
+Enter PIN A in the browser, enter its code B locally, review the peer, then approve.
+Only one device may pair. Commands here: pair, revoke, reject, quit.
+Terminal transport is encrypted, but HTTP page delivery can be modified by an active
+network attacker. Use only trusted private networks. Keep this computer awake.`);
+    return;
+  }
+  if (parsed.values.version) { console.log('haze-remote 0.1.0'); return; }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('A local interactive terminal is required for device approval. Do not pipe stdin/stdout.');
+  const port = Number(parsed.values.port);
+  if (!/^\d+$/.test(parsed.values.port!) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Port must be an integer between 0 and 65535.');
+  if (parsed.values.lan && parsed.values.host) throw new Error('Choose --lan or --host, not both.');
+  let host = parsed.values.host ?? '127.0.0.1';
+  if (parsed.values.lan) {
+    const addresses = [...new Set(Object.values(networkInterfaces()).flatMap(entries => (entries ?? []).filter(e => e.family === 'IPv4' && !e.internal && privateAddress(e.address)).map(e => e.address)))];
+    if (addresses.length !== 1) throw new Error(`Choose a private address with --host. Available: ${addresses.join(', ') || 'none'}`);
+    host = addresses[0];
+  }
+  if (!privateAddress(host)) throw new Error('Use a specific private/VPN or loopback address, not 0.0.0.0, ::, or a public address.');
+  const command = parsed.values.haze!;
+  let executable: string | undefined;
+  const candidates = command.includes('/') ? [resolve(command)] : (process.env.PATH ?? '').split(delimiter).map(dir => join(dir, command));
+  for (const candidate of candidates) {
+    try { await access(candidate, constants.X_OK); executable = candidate; break; } catch { /* Next PATH directory. */ }
+  }
+  if (!executable) throw new Error(`Haze executable not found: ${command}. Install @denizokcu/haze or use --haze /path/to/haze.`);
+  console.log('\nhaze-remote: terminal content will be encrypted. The HTTP-delivered application is NOT protected against active network interception.\nPair only on trusted networks. Local approval grants your OS user’s coding-agent permissions.');
+  const remote = await startRemote({ host, port, cwd: resolve(parsed.values.cwd!), executable,
+    args: split < 0 ? [] : args.slice(split + 1), assets: fileURLToPath(new URL('../client/', import.meta.url)),
+    onPin(pin) {
+      console.log(pin ? `\nPIN A: ${pin.pin} · expires ${new Date(pin.expiresAt).toLocaleTimeString()} (20 seconds). Enter it in the browser.` : '\nPairing closed. Use "pair" to reopen when no device is paired.');
+    },
+    onPending() { console.log('\nBrowser passed PIN A. Enter the 8-digit code B shown on that device here within 20 seconds.'); },
+  });
+  console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: http://${host.includes(':') ? `[${host}]` : host}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.\n`);
+  const local = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  let reviewId: string | undefined;
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true; local.close();
+    console.log('\nStopping Haze and haze-remote…');
+    await remote.close();
+  };
+  local.on('line', line => {
+    try {
+      const value = line.trim();
+      if (/^\d{8}$/.test(value)) {
+        const review = remote.local.confirm(value);
+        reviewId = review.id;
+        console.log(`\nApprove remote control of Haze?\nObserved network peer: ${review.peer}\nReported browser: ${review.browser}\nReported platform: ${review.platform}\nCheck the IP in your tablet’s Wi-Fi settings. Browser/platform are self-reported; VPN/proxy addresses may differ.\nNo physical location is inferred.\nThis grants terminal output/input and code execution with your permissions.\nType "approve" or "reject" before ${new Date(review.expiresAt).toLocaleTimeString()}.`);
+      } else if (value === 'approve') {
+        if (!reviewId) throw new Error('Enter code B locally and review the device first.');
+        remote.local.approve(reviewId); reviewId = undefined;
+        console.log('Device approved. Pairing closed. Use "revoke" to remove access.');
+      } else if (value === 'reject') { remote.local.reject(); reviewId = undefined; console.log('Request rejected.'); }
+      else if (value === 'pair') { remote.local.pair(); reviewId = undefined; }
+      else if (value === 'revoke') { remote.local.revoke(); reviewId = undefined; console.log('Device revoked. Haze continues. Use "pair" to pair a new device.'); }
+      else if (value === 'quit') { void shutdown(); }
+      else if (value) console.log('Enter code B, approve, reject, pair, revoke, or quit.');
+    } catch (error) { console.error(error instanceof Error ? error.message : 'Local operation failed'); }
+    if (!closing) local.prompt();
+  });
+  local.setPrompt('haze-remote local> '); local.prompt();
+  local.on('SIGINT', () => { void shutdown(); });
+  local.on('close', () => { if (!closing) void shutdown(); });
+  process.once('SIGINT', () => { void shutdown(); });
+  process.once('SIGTERM', () => { void shutdown(); });
+  void remote.exited.then(() => console.log('Haze exited. Its recent output remains available until haze-remote stops.'));
+}
+main().catch(error => { console.error(`haze-remote: ${error.message}`); process.exitCode = 1; });

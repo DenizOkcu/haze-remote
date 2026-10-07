@@ -1,0 +1,41 @@
+// Opt-in installed Haze check with empty HOME: no model calls or credential reads.
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import headless from '@xterm/headless';
+import { startRemote } from '../server/server.js';
+import { connection, until, delay } from './helpers.js';
+const executable = process.argv[2];
+if (!executable) throw new Error('Usage: npm run test:haze -- /absolute/path/to/haze');
+const home = await mkdtemp(join(tmpdir(), 'haze-remote-haze-'));
+const remote = await startRemote({ host: '127.0.0.1', port: 0, cwd: home, executable, args: ['--no-session'], assets: resolve('tests/fixtures'), env: { PATH: process.env.PATH!, HOME: home, LANG: 'en_US.UTF-8' } });
+const origin = `http://127.0.0.1:${remote.port}`;
+let current: Awaited<ReturnType<typeof connection>> | undefined;
+const terminal = new headless.Terminal({ cols: 100, rows: 30, allowProposedApi: true });
+terminal.onData(data => current?.session.send({ type: 'input', data }));
+try {
+  current = await connection(origin, remote.local.pin()!.pin);
+  await until(() => !!current?.state.code);
+  remote.local.approve(remote.local.confirm(current.state.code!).id);
+  current.session.subscribe(message => { current!.messages.push(message); if (message.data) terminal.write(message.data); });
+  for (const message of current.messages) if (message.data) terminal.write(message.data);
+  await until(() => /haze|Haze/.test(current!.output()));
+  await delay(1000);
+  current.session.send({ type: 'input', data: '/help' });
+  await until(() => current!.output().includes('/help'));
+  await delay(100);
+  current.session.send({ type: 'input', data: '\r' });
+  await until(() => /\/exit|\/quit|\/provider|Commands/.test(current!.output()));
+  const credential = current.state.credential!;
+  current.session.close(); await until(() => current!.state.closed !== undefined);
+  process.kill(remote.pid, 0);
+  current = await connection(origin, credential.password, credential);
+  await until(() => current!.messages.some(m => m.type === 'snapshot' && m.pid === remote.pid));
+  assert.match(current.output(), /\/exit|\/quit|\/provider|Commands/);
+  current.session.send({ type: 'input', data: '/exit' }); await delay(200);
+  current.session.send({ type: 'input', data: '\r' });
+  await until(() => current!.messages.some(m => m.type === 'exit'));
+  assert.equal(current.messages.find(m => m.type === 'exit').exitCode, 0);
+  console.log('PASS: installed Haze /help, encrypted reconnect with same PID/screen, and clean /exit without a model call.');
+} finally { current?.ws.terminate(); terminal.dispose(); await remote.close(); await rm(home, { recursive: true, force: true }); }

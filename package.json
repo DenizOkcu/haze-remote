@@ -1,0 +1,62 @@
+{
+  "name": "haze-remote",
+  "version": "0.1.0",
+  "description": "Control an installed Haze terminal agent from a paired browser",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "haze-remote": "dist/server/cli.js"
+  },
+  "files": [
+    "dist",
+    "scripts/prepare-pty.mjs",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/prepare-pty.mjs",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:server && vite build",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json",
+    "start": "node dist/server/cli.js",
+    "test": "tsx --test tests/security.test.ts tests/server.test.ts",
+    "test:browser": "playwright test",
+    "test:haze": "tsx tests/haze-smoke.ts",
+    "test:package": "npm run build && node tests/package-smoke.mjs",
+    "prepack": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/headless": "6.0.0",
+    "@xterm/xterm": "6.0.0",
+    "libsodium-wrappers": "0.8.4",
+    "node-pty": "1.1.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vite": "8.3.3"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true,
+    "esbuild@0.28.2": true
+  }
+}
