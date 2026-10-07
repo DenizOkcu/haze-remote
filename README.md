@@ -76,7 +76,7 @@ These are handled by haze-remote's own stdin, **not** the bridged Haze PTY. No H
 
 Tap the terminal and type — the cursor is placed there automatically at startup and after reconnects. Your device's normal paste and on-screen keyboard work directly in the terminal; press **Enter** to submit. Input is delivered live over the encrypted channel — nothing is queued or replayed automatically. Ctrl+C follows Haze's interrupt semantics, not the local server shutdown command.
 
-The computer must stay awake and haze-remote must remain running. Tablet sleep, closed tabs, or lost connectivity do not stop Haze. Reconnect restores the same PID and recent screen/history. Input is never queued offline. Haze exiting leaves its final screen available until the server stops.
+The computer must stay awake and haze-remote must remain running. To keep the host awake, haze-remote holds an OS power assertion (`caffeinate` on macOS, `systemd-inhibit` on Linux) tied to its own lifetime — released automatically on exit, even after a crash or kill. Disable with `--no-keep-awake`. On systems without either helper it degrades silently; on laptops configured to sleep on lid close, that setting still wins. Tablet sleep, closed tabs, or lost connectivity do not stop Haze. Reconnect restores the same PID and recent screen/history. Input is never queued offline. Haze exiting leaves its final screen available until the server stops.
 
 ### Terminal controls
 

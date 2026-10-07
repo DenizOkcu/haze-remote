@@ -7,6 +7,7 @@ import { constants } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline';
 import { startRemote, privateAddress } from './server.js';
+import { acquireKeepAwake } from './keep-awake.js';
 import { PIN_MS, CONFIRM_MS, REVIEW_MS } from '../shared/crypto.js';
 
 async function main() {
@@ -17,6 +18,7 @@ async function main() {
     port: { type: 'string', default: '8787' }, cwd: { type: 'string', default: process.cwd() },
     haze: { type: 'string', default: 'haze' },
     project: { type: 'string', multiple: true },
+    'keep-awake': { type: 'boolean', default: true },
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' },
   } });
   if (parsed.values.help) {
@@ -29,6 +31,7 @@ Usage: haze-remote [options] [-- <Haze arguments>]
   --cwd <path>     Project directory (default: current directory)
   --haze <path>    Haze executable (default: haze on PATH)
   --project <path> Approve another project/worktree for new tabs (repeatable)
+  --[no-]keep-awake  Prevent host standby while running (default: on; macOS caffeinate, Linux systemd-inhibit)
   -h, --help      Show help
   -v, --version   Show version
 
@@ -68,13 +71,14 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
     },
     onPending() { console.log(`\nBrowser passed PIN A. Enter the 8-digit code B shown on that device here within ${CONFIRM_MS / 60_000} minutes. Device review gets its own ${REVIEW_MS / 60_000} minutes after code entry.`); },
   });
-  console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: http://${host.includes(':') ? `[${host}]` : host}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.\n`);
+  const keepAwake = await acquireKeepAwake({ pid: remote.pid, disable: !parsed.values['keep-awake'], log: message => console.log(message) });
+  console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: http://${host.includes(':') ? `[${host}]` : host}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.${keepAwake.enabled ? '\nHost standby is prevented while haze-remote runs (--no-keep-awake to disable).' : ''}\n`);
   const local = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   let reviewId: string | undefined;
   let closing = false;
   const shutdown = async () => {
     if (closing) return;
-    closing = true; local.close();
+    closing = true; local.close(); keepAwake.stop();
     console.log('\nStopping Haze and haze-remote…');
     await remote.close();
   };
