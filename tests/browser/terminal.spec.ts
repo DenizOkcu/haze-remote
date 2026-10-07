@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startRemote, privateAddress } from '../../server/server.js';
@@ -13,11 +13,12 @@ test.beforeEach(async ({ page }, testInfo) => {
   const realHaze = testInfo.title.startsWith('installed Haze');
   if (realHaze && !process.env.HAZE_SMOKE_EXECUTABLE) test.skip(true, 'No installed Haze executable selected');
   cwd = await mkdtemp(join(tmpdir(), 'haze-remote-browser-'));
+  await mkdir(join(cwd, 'home'));
   remote = await startRemote({ host: lan ?? '127.0.0.1', port: 0, cwd,
     executable: realHaze ? process.env.HAZE_SMOKE_EXECUTABLE! : process.execPath,
     args: realHaze ? ['--no-session'] : [resolve('tests/fixtures/observed-agent.mjs')],
     newArgs: realHaze ? ['--no-session'] : [resolve('tests/fixtures/observed-agent.mjs')], assets: resolve('dist/client'),
-    env: { HOME: cwd, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
+    env: { HOME: join(cwd, 'home'), PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
   origin = `http://${lan ?? '127.0.0.1'}:${remote.port}`;
   await page.addInitScript(() => {
     const sockets: WebSocket[] = [];
@@ -222,12 +223,12 @@ test('fleet tabs launch real PTYs, isolate terminal input, reconnect without dup
   await context.setOffline(false);
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('tab')).toHaveCount(2);
+  await expect(page.getByRole('tablist', { name: 'Haze instances' }).getByRole('tab')).toHaveCount(2);
   await expect(page.locator('.session-meta')).toContainText(`PID ${secondPid}`);
   await page.reload();
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('tab')).toHaveCount(2);
+  await expect(page.getByRole('tablist', { name: 'Haze instances' }).getByRole('tab')).toHaveCount(2);
   await expect(page.locator('.session-meta')).toContainText(`PID ${secondPid}`);
   page.once('dialog', dialog => dialog.dismiss());
   await page.getByRole('button', { name: 'Stop instance' }).click();
@@ -239,7 +240,7 @@ test('fleet tabs launch real PTYs, isolate terminal input, reconnect without dup
   await page.getByRole('button', { name: 'Close tab' }).click();
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('status')).toHaveText('Connected');
-  await expect(page.getByRole('tab')).toHaveCount(1);
+  await expect(page.getByRole('tablist', { name: 'Haze instances' }).getByRole('tab')).toHaveCount(1);
   expect(errors).toEqual([]);
 });
 
@@ -284,7 +285,9 @@ test('subagent sidebar shows observed runs with live output and retains finished
 
 test('installed Haze fleet launches independent native instances and exits one without stopping the other', async ({ page }) => {
   await pair(page);
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText(/Configured providers:\s*0/);
   await type(page, '/help');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› /help');
   await enter(page);
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('/exit');
   await page.getByRole('button', { name: 'New instance' }).click();
@@ -297,6 +300,7 @@ test('installed Haze fleet launches independent native instances and exits one w
   const secondPid = Number((await page.locator('.session-meta').textContent())?.match(/PID (\d+)/)?.[1]);
   expect(secondPid).toBeGreaterThan(0); expect(secondPid).not.toBe(remote.pid);
   await type(page, '/help');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› /help');
   await enter(page);
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('/exit');
   await page.getByRole('tab', { name: /Haze 1/ }).click();
@@ -306,6 +310,8 @@ test('installed Haze fleet launches independent native instances and exits one w
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
   await page.getByRole('tab', { name: /Native second/ }).click();
   await expect(page.getByRole('status')).toHaveText('Connected');
+  // Instance selection retains keyboard focus on its tab for accessible navigation.
+  await page.getByLabel('Haze terminal', { exact: true }).click();
   await type(page, '/exit');
   await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› /exit');
   await enter(page);
@@ -314,4 +320,97 @@ test('installed Haze fleet launches independent native instances and exits one w
   await page.getByRole('tab', { name: /Haze 1/ }).click();
   await expect(page.getByRole('status')).toHaveText('Connected');
   await expect(page.locator('.session-meta')).toContainText(`PID ${remote.pid}`);
+});
+
+test('skills tab creates global and project workflows, searches, edits, protects drafts and opens Haze management', async ({ page, context }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await pair(page);
+  await page.getByRole('tab', { name: 'Skills', exact: true }).click();
+  await expect(page.getByText('No skills installed yet.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'New skill', exact: true }).click();
+  await page.getByLabel('Skill directory', { exact: true }).fill('release-checklist');
+  await page.getByLabel('Skill Markdown', { exact: true }).fill('---\nname: release-checklist\ndescription: Check a release before publishing.\n---\n\n# Procedure\nRun tests and report.\n');
+  await page.getByRole('button', { name: 'Create skill', exact: true }).click();
+  await expect(page.getByText('Saved to SKILL.md', { exact: false })).toBeVisible();
+  const projectPath = join(cwd, '.haze', 'skills', 'release-checklist', 'SKILL.md');
+  expect(await readFile(projectPath, 'utf8')).toContain('Run tests and report.');
+  await page.getByRole('button', { name: 'New skill', exact: true }).click();
+  await page.getByLabel('Skill directory', { exact: true }).fill('release-checklist');
+  await page.getByLabel('Save in', { exact: true }).selectOption('global');
+  await page.getByRole('button', { name: 'Create skill', exact: true }).click();
+  await expect(page.getByText('2 of 2 skills', { exact: true })).toBeVisible();
+  await page.getByLabel('Skill scope', { exact: true }).selectOption('project-1');
+  await expect(page.getByText('1 of 2 skills', { exact: true })).toBeVisible();
+  await page.getByLabel('Search skills', { exact: true }).fill('no-match');
+  await expect(page.getByText('No skills match your search.')).toBeVisible();
+  await page.getByLabel('Search skills', { exact: true }).fill('release');
+  await page.getByRole('button', { name: '/release-checklist', exact: false }).click();
+  const editor = page.getByLabel('Skill Markdown', { exact: true });
+  const original = await editor.inputValue();
+  await editor.fill(original + '\nDraft to preserve.');
+  await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('tab', { name: 'Skills', exact: true }).click();
+  await expect(editor).toHaveValue(original + '\nDraft to preserve.');
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.getByRole('button', { name: 'New skill', exact: true }).click();
+  await expect(editor).toHaveValue(original + '\nDraft to preserve.');
+  await writeFile(projectPath, original + '\nExternal edit.');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('changed on disk');
+  expect(await readFile(projectPath, 'utf8')).toContain('External edit.');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '/release-checklist', exact: false }).click();
+  await editor.fill((await editor.inputValue()) + '\nBrowser edit.');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByText('Saved to SKILL.md', { exact: false })).toBeVisible();
+  expect(await readFile(projectPath, 'utf8')).toContain('Browser edit.');
+  await editor.fill((await editor.inputValue()) + '\nOffline draft.');
+  await context.setOffline(true);
+  await page.evaluate(() => (window as any).__sockets.forEach((ws: WebSocket) => ws.close()));
+  await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
+  await expect(editor).toHaveValue(/Offline draft/);
+  await context.setOffline(false);
+  await expect(page.getByRole('status')).toHaveText('Connected', { timeout: 15_000 });
+  await expect(editor).toHaveValue(/Offline draft/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Open /skills in Haze', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Terminal', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('[aria-label="Haze terminal"]')).toContainText('/skills');
+  expect(errors).toEqual([]);
+});
+
+test('installed Haze skills tab saves a compatible workflow and opens native management', async ({ page }) => {
+  await pair(page);
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText(/Configured providers:\s*0/);
+  await page.getByRole('tab', { name: 'Skills', exact: true }).click();
+  await page.getByRole('button', { name: 'New skill', exact: true }).click();
+  await page.getByLabel('Skill directory', { exact: true }).fill('native-workflow');
+  await page.getByRole('button', { name: 'Create skill', exact: true }).click();
+  await expect(page.getByText('Saved to SKILL.md', { exact: false })).toBeVisible();
+  // Installed Haze loads its skill registry at startup, not when opening /skills.
+  await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'New instance', exact: true }).click();
+  await page.getByLabel('Instance name', { exact: true }).fill('Skill session');
+  await page.getByLabel('Allow shared checkout').check();
+  await page.getByRole('button', { name: 'Start Haze', exact: true }).click();
+  await expect(page.getByRole('tab', { name: /Skill session/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('status')).toHaveText('Connected');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText(/Configured providers:\s*0/);
+  await page.getByRole('tab', { name: 'Skills', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open /skills in Haze', exact: true })).toBeEnabled();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Open /skills in Haze', exact: true }).click();
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› /skills');
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('native-workflow');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('add skill');
+  // Select the actual installed workflow and exercise the native action picker.
+  await type(page, 'native-workflow');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('› native-workflow');
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('show info');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('validate');
+  await expect(page.getByLabel('Haze terminal', { exact: true })).toContainText('remove skill');
 });

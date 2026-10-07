@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClientSession } from '../shared/session.js';
@@ -8,6 +8,8 @@ import { sendTerminalInput, type InputResult } from './input';
 import { SubagentSidebar, SubagentOverlay } from './SubagentSidebar';
 import type { FleetState, FleetRequest } from '../shared/fleet.js';
 import type { WorkerOutput } from '../shared/observer.js';
+import type { SkillResponse } from '../shared/skills.js';
+import { SkillsTab, type SkillCommand } from './SkillsTab';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
 type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
@@ -27,6 +29,9 @@ export function App() {
   const [exitCode, setExitCode] = useState<number>();
   const [epoch, setEpoch] = useState(0);
   const [fleet, setFleet] = useState<FleetState>();
+  const [view, setView] = useState<'terminal' | 'skills'>('terminal');
+  const viewRef = useRef(view); viewRef.current = view;
+  const skillPending = useRef(new Map<string, { resolve: (value: SkillResponse & { type: 'skills-result' }) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>());
   const [activeId, setActiveId] = useState('');
   const [operation, setOperation] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
@@ -58,6 +63,27 @@ export function App() {
   const session = useRef<ClientSession | undefined>(undefined);
   const closed = useRef<((code: number) => void) | undefined>(undefined);
   const input = useRef<(data: string) => InputResult>(() => 'not-sent');
+  const requestSkill = useCallback((command: SkillCommand) => new Promise<SkillResponse & { type: 'skills-result' }>((resolve, reject) => {
+    const id = requestId();
+    const timer = setTimeout(() => {
+      skillPending.current.delete(id);
+      reject(new Error('Skill operation was not confirmed. Refresh or reopen the skill before retrying; nothing is replayed automatically.'));
+    }, 12_000);
+    skillPending.current.set(id, { resolve, reject, timer });
+    try {
+      if (!session.current?.send({ ...command, requestId: id })) throw new Error('Request not sent');
+    } catch {
+      clearTimeout(timer); skillPending.current.delete(id);
+      reject(new Error('Skill request was not sent. Reconnect and try again.'));
+    }
+  }), []);
+  function disconnectSkills() {
+    for (const pending of skillPending.current.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Connection lost. Reopen the skill to check whether a save completed; your draft is preserved.'));
+    }
+    skillPending.current.clear();
+  }
   function finishOperation(id?: string) {
     if (id && pendingOperation.current?.id !== id) return;
     clearTimeout(operationTimeout.current); pendingOperation.current = undefined; setOperation(undefined);
@@ -163,7 +189,7 @@ export function App() {
     const send = (message: unknown) => session.current?.send(message) ?? false;
     input.current = data => {
       const target = display.current;
-      const result = sendTerminalInput(data, ready && !processExited && session.current?.socket.readyState === WebSocket.OPEN,
+      const result = sendTerminalInput(data, ready && !processExited && viewRef.current === 'terminal' && session.current?.socket.readyState === WebSocket.OPEN,
         message => send({ ...message, instanceId: target.id, viewId: target.viewId }));
       if (result === 'too-large') setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.');
       else if (result !== 'queued') setError(result === 'partial'
@@ -209,6 +235,15 @@ export function App() {
       unsubscribe = connection.subscribe(message => {
         if (disposed || session.current !== connection) return;
         lastContact.current = Date.now();
+        if (message.type === 'skills-result' || message.type === 'skills-error') {
+          const pending = skillPending.current.get(message.requestId);
+          if (pending) {
+            clearTimeout(pending.timer); skillPending.current.delete(message.requestId);
+            if (message.type === 'skills-error') pending.reject(new Error(message.message));
+            else pending.resolve(message);
+          }
+          return;
+        }
         if (message.type === 'snapshot') {
           const pending = pendingOperation.current;
           const focusSelectedTab = pending?.type === 'instance-select';
@@ -231,7 +266,7 @@ export function App() {
               // Startup and reconnect land the cursor in the terminal, but never steal it from a form field mid-entry.
               const active = document.activeElement;
               const inFormControl = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement;
-              if (!inFormControl) term.focus();
+              if (!inFormControl && viewRef.current === 'terminal') term.focus();
             }
           });
         } else if (message.type === 'output') {
@@ -286,7 +321,7 @@ export function App() {
     }
     closed.current = code => {
       if (disposed) return;
-      disconnectInput(); finishOperation();
+      disconnectInput(); finishOperation(); disconnectSkills();
       if (code === 4000) { reconnectAllowed = false; setStatus('Already connected'); return; }
       if (code === 4001 || code === 1008) { dropCredential(); return; }
       schedule();
@@ -310,13 +345,13 @@ export function App() {
       if (disposed || !reconnectAllowed) return;
       // A WebSocket close handshake can stall while the browser is offline.
       // Do not advertise Connected or leave controls enabled until onclose fires.
-      disconnectInput(); finishOperation(); setStatus('Reconnecting'); setRetryAt(undefined);
+      disconnectInput(); finishOperation(); disconnectSkills(); setStatus('Reconnecting'); setRetryAt(undefined);
       session.current?.close();
     };
     document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake); window.addEventListener('offline', offline);
     if (session.current) attach(session.current); else void connect();
     return () => {
-      disposed = true; closed.current = undefined; input.current = () => 'not-sent';
+      disposed = true; closed.current = undefined; input.current = () => 'not-sent'; disconnectSkills();
       retryNow.current = () => {}; fitCurrent.current = () => {}; fleetRequest.current = () => {}; finishOperation();
       clearTimeout(retry); clearInterval(heartbeat); unsubscribe?.();
       document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('offline', offline);
@@ -378,6 +413,22 @@ export function App() {
     {status === 'Reconnecting' && <div className="notice">Connection lost. Disconnecting the browser does not stop Haze. Check that the host is awake, haze-remote is running, and the network is reachable. {retryAt ? `Retry in ${Math.max(0, Math.ceil((retryAt - clock) / 1000))}s.` : 'Re-authenticating…'} <button onClick={() => retryNow.current()}>Retry now</button></div>}
     {status === 'Exited' && <div className="notice">Haze exited. Recent output is available until haze-remote stops.</div>}
     {error && <div className="error" role="alert">{error}</div>}
+    <nav className="workspace-tabs" role="tablist" aria-label="Workspace sections" onKeyDown={event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 'terminal' : event.key === 'End' ? 'skills' : view === 'terminal' ? 'skills' : 'terminal';
+      setView(next); document.getElementById(`${next}-tab`)?.focus();
+    }}>
+      <button role="tab" id="terminal-tab" aria-selected={view === 'terminal'} aria-controls="terminal-panel" tabIndex={view === 'terminal' ? 0 : -1} onClick={() => setView('terminal')}>Terminal</button>
+      <button role="tab" id="skills-tab" aria-selected={view === 'skills'} aria-controls="skills-panel" tabIndex={view === 'skills' ? 0 : -1} onClick={() => setView('skills')}>Skills</button>
+    </nav>
+    <SkillsTab active={view === 'skills'} connected={canOperate} projectId={activeInstance?.projectId} request={requestSkill} onManage={() => {
+      if (!connected || activeInstance?.state !== 'running') { setError('Select a running Haze instance in the Terminal tab to open /skills.'); return; }
+      if (!window.confirm('Type /skills into the selected Haze terminal? Continue only when Haze is idle at an empty prompt. Review it and press Enter to open the picker.')) return;
+      viewRef.current = 'terminal'; setView('terminal');
+      input.current('/skills'); requestAnimationFrame(() => terminal.current?.focus());
+    }} />
+    <div id="terminal-panel" role="tabpanel" aria-labelledby="terminal-tab" className="terminal-section" hidden={view !== 'terminal'}>
     <div className="fleet-navigation">
       <nav className="fleet-tabs" role="tablist" aria-label="Haze instances">{fleet?.instances.map(instance => <button key={instance.id} role="tab" id={`tab-${instance.id}`} aria-controls="fleet-terminal" aria-selected={activeId === instance.id} tabIndex={activeId === instance.id ? 0 : -1} disabled={!canOperate || !!operation} onKeyDown={event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !fleet) return;
@@ -409,5 +460,6 @@ export function App() {
     {(() => { const worker = activeInstance?.subagents?.workers?.find(item => item.key === watchedWorker); return worker ? <SubagentOverlay worker={worker} output={workerOutput} onClose={() => selectWorker(undefined)} /> : null; })()}
     <footer>Encrypted terminal transport · Input never queued offline · Haze remains on your computer</footer>
     </section></div>
+    </div>
   </main>;
 }

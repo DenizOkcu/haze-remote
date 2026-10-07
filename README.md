@@ -99,6 +99,13 @@ haze-remote --lan --cwd /path/to/project --project /path/to/other-worktree
 
 Project selection is not a sandbox: Haze retains your OS-user authority. There is no automatic worktree creation or merge/delete operation.
 
+### Skills tab
+
+- **Skills** lists all global (`~/.haze/skills`) and locally approved project (`.haze/skills`) workflows, including disabled and same-named skills. Search by name/description or filter by scope. Project skills take precedence in Haze.
+- **New skill** creates a real `<name>/SKILL.md` in the chosen scope from an editable template. Select an existing skill to read and edit its complete Markdown; malformed frontmatter is flagged and can be repaired. YAML `name` and `description` are required. Saves persist on the host through the approved encrypted connection, and stale edits are rejected rather than overwriting changes on disk.
+- **Open /skills in Haze** switches to the selected running instance and types `/skills`; review the idle prompt and press Enter to open its native picker for AI generation, info, enable/disable, full validation, and removal. The remote file catalog does not read credential-bearing Haze settings, so enabled status remains managed in Haze.
+- Unsaved drafts survive switching tabs and reconnecting, but not browser reload. Start a fresh Haze instance to load saved changes into its skill catalog. Reference files are left untouched. Symlinked roots/directories, linked files, and files over Haze’s 256 KiB skill limit are refused and reported; the browser cannot supply arbitrary file paths.
+
 ### Subagent sidebar
 
 The sidebar sits to the right of the terminal and belongs to the selected parent instance. When Haze spawns subagents, they appear in the sidebar automatically — no linking step. Runs are grouped Running/Finished, and finished runs stay inspectable for the session's lifetime:

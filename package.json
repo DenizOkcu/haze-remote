@@ -27,7 +27,7 @@
     "build": "npm run build:server && vite build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json",
     "start": "node dist/server/cli.js",
-    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts",
+    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts tests/skills.test.ts",
     "test:browser": "playwright test",
     "test:haze": "tsx tests/haze-smoke.ts",
     "test:package": "npm run build && node tests/package-smoke.mjs",
@@ -44,7 +44,8 @@
     "node-pty": "1.1.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "ws": "8.22.0"
+    "ws": "8.22.0",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

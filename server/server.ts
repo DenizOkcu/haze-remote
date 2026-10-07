@@ -8,6 +8,8 @@ import { AccessController } from './access.js';
 import type { DeviceReview } from './pairing.js';
 import { FleetManager } from './fleet.js';
 import { isFleetRequest, type FleetProject } from '../shared/fleet.js';
+import { isSkillRequest } from '../shared/skills.js';
+import { SkillManager } from './skills.js';
 
 export interface RemoteOptions {
   host: string; port: number; cwd: string; executable: string; args: string[]; assets: string;
@@ -46,7 +48,8 @@ export async function startRemote(options: RemoteOptions) {
   let primaryId = '', lastSelectedId = '';
   let selection: { id: string; viewId: string; ws: WebSocket; ready: boolean } | undefined;
   const creations = new Map<string, Promise<string>>();
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
+  const skills = new SkillManager(projects, options.env?.HOME);
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false });
   const access = new AccessController({ onPin: options.onPin, onPending: options.onPending,
     onAuthenticated(ws) {
       alive = true;
@@ -66,6 +69,16 @@ export async function startRemote(options: RemoteOptions) {
         if (message.type === 'input') {
           if (!fleet.input(id, message.data)) send(ws, { type: 'fleet-error', message: 'This Haze instance has stopped. Select or start a running instance.' });
         } else fleet.resize(id, message.cols, message.rows);
+        return;
+      }
+      if (typeof message?.type === 'string' && /^(skills-|skill-)/.test(message.type)) {
+        if (!isSkillRequest(message)) { send(ws, { type: 'skills-error', requestId: message.requestId, message: 'Invalid skill request.' }); return; }
+        void skills.execute(message, () => access.isActive(ws)).then(result => {
+          if (access.isActive(ws)) send(ws, { type: 'skills-result', requestId: message.requestId, ...result });
+        }).catch(error => {
+          const detail = error instanceof Error && !('code' in error) ? error.message : 'Skill operation failed. Check the skill directory and try again.';
+          if (access.isActive(ws)) send(ws, { type: 'skills-error', requestId: message.requestId, message: detail.slice(0, 240) });
+        });
         return;
       }
       if (!isFleetRequest(message)) throw new Error('Invalid fleet message');
