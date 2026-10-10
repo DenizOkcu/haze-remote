@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { createServer as createHttpsServer } from 'node:https';
+import { randomUUID, X509Certificate } from 'node:crypto';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { resolve, sep, extname, basename } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -13,10 +14,15 @@ import { SkillManager } from './skills.js';
 import { isManagementRequest } from '../shared/configuration.js';
 import { ConfigurationManager } from './configuration.js';
 import { SessionCatalog } from './sessions.js';
+import { SpeechService, decodeAudio, type SpeechBackend } from './speech.js';
+import { isSpeechRequest } from '../shared/speech.js';
 
 export interface RemoteOptions {
   host: string; port: number; cwd: string; executable: string; args: string[]; assets: string;
   newArgs?: string[];
+  speech?: SpeechBackend;
+  tls?: { cert: Buffer; key: Buffer };
+  hostname?: string;
   projects?: { name: string; cwd: string }[];
   // Tests use isolated HOME. Production inherits the Haze environment unchanged.
   env?: Record<string, string>;
@@ -35,6 +41,12 @@ export async function startRemote(options: RemoteOptions) {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('macOS and Linux are supported.');
   await stat(resolve(options.assets, 'index.html'));
   if (!privateAddress(options.host)) throw new Error('Bind to a specific private/VPN or loopback address. Wildcard/public bindings are disabled.');
+  if (options.hostname) {
+    if (options.hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(options.hostname)) throw new Error('Use an exact lowercase DNS hostname, not a URL or wildcard.');
+    if (!options.tls) throw new Error('A DNS hostname requires TLS.');
+    const certificate = new X509Certificate(options.tls.cert);
+    if (!certificate.checkHost(options.hostname, { wildcards: false }) || Date.parse(certificate.validTo) <= Date.now() || Date.parse(certificate.validFrom) > Date.now()) throw new Error('TLS certificate must be valid for the configured hostname.');
+  }
   const projects: FleetProject[] = [];
   for (const project of [{ cwd: options.cwd, name: basename(resolve(options.cwd)) || 'Project' }, ...(options.projects ?? [])]) {
     const cwd = await realpath(resolve(project.cwd));
@@ -46,11 +58,18 @@ export async function startRemote(options: RemoteOptions) {
   await AccessController.ready();
   const hosts = new Set([options.host.includes(':') ? `[${options.host}]` : options.host]);
   if (options.host === 'localhost' || options.host.startsWith('127.') || options.host === '::1') for (const host of ['localhost', '127.0.0.1', '[::1]']) hosts.add(host);
+  if (options.hostname) hosts.add(options.hostname);
+  const protocol = options.tls ? 'https' : 'http';
   let port = options.port, stopped = false, alive = true;
   let fleet: FleetManager;
   let primaryId = '', lastSelectedId = '';
   let selection: { id: string; viewId: string; ws: WebSocket; ready: boolean } | undefined;
   const creations = new Map<string, Promise<string>>();
+  const speech = options.speech ?? new SpeechService(options.env?.HOME);
+  const speechJobs = new Map<WebSocket, { id: string; controller: AbortController }>();
+  let modelDownload: { controller: AbortController; done: Promise<void> } | undefined;
+  let modelDownloadError: string | undefined;
+  const speechStatus = async () => ({ ...await speech.status(), ...(modelDownloadError ? { error: modelDownloadError } : {}) });
   const skills = new SkillManager(projects, options.env?.HOME);
   const configuration = new ConfigurationManager(options.env?.HOME);
   const sessions = new SessionCatalog(projects, options.env?.HOME);
@@ -62,6 +81,56 @@ export async function startRemote(options: RemoteOptions) {
     },
     onMessage(message, ws) {
       if (message?.type === 'ping') { send(ws, { type: 'pong' }); return; }
+      if (typeof message?.type === 'string' && message.type.startsWith('speech-')) {
+        if (!isSpeechRequest(message)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Invalid speech request.' }); return; }
+        if (message.type === 'speech-cancel') {
+          const job = speechJobs.get(ws);
+          if (job?.id === message.targetRequestId) job.controller.abort();
+          return;
+        }
+        if (message.type === 'speech-download' || message.type === 'speech-download-cancel') {
+          void (async () => {
+            if (message.type === 'speech-download-cancel') {
+              const job = modelDownload;
+              job?.controller.abort(); await job?.done;
+              modelDownloadError = undefined;
+            } else if (!modelDownload) {
+              // Once approved, downloading belongs to the host, not a browser socket.
+              modelDownloadError = undefined;
+              const job = { controller: new AbortController(), done: Promise.resolve() };
+              modelDownload = job;
+              job.done = speech.download(job.controller.signal).catch(error => {
+                if (!job.controller.signal.aborted) modelDownloadError = error instanceof Error && !('code' in error)
+                  ? error.message.slice(0, 240) : 'Model download failed. Check internet access and retry.';
+              }).finally(() => { if (modelDownload === job) modelDownload = undefined; });
+            }
+            const status = await speechStatus();
+            if (access.isActive(ws)) send(ws, { type: 'speech-result', requestId: message.requestId, status });
+          })().catch(() => { if (access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Speech service unavailable.' }); });
+          return;
+        }
+        if (message.type === 'speech-status') {
+          void speechStatus().then(status => { if (access.isActive(ws)) send(ws, { type: 'speech-result', requestId: message.requestId, status }); })
+            .catch(() => { if (access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Speech service unavailable.' }); });
+          return;
+        }
+        if (speechJobs.has(ws)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'A speech operation is already running.' }); return; }
+        const job = { id: message.requestId, controller: new AbortController() }; speechJobs.set(ws, job);
+        void (async () => {
+          try {
+            let text: string | undefined;
+            const audio = decodeAudio(message.audio);
+            message.audio = ''; // Drop the transport's audio reference before inference.
+            try { text = await speech.transcribe(audio, job.controller.signal); }
+            finally { audio.fill(0); }
+            if (!job.controller.signal.aborted && access.isActive(ws)) send(ws, { type: 'speech-result', requestId: message.requestId, status: await speech.status(), ...(text !== undefined ? { text } : {}) });
+          } catch (error) {
+            if (!job.controller.signal.aborted && access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId,
+              message: error instanceof Error && !('code' in error) ? error.message.slice(0, 240) : 'Speech operation failed. Retry when the service is available.' });
+          } finally { if (speechJobs.get(ws) === job) speechJobs.delete(ws); }
+        })();
+        return;
+      }
       if (message?.type === 'input' || message?.type === 'resize') {
         const id = message.instanceId ?? primaryId;
         if (message.type === 'input' && (typeof message.data !== 'string' || Buffer.byteLength(message.data) > 16 * 1024)) throw new Error('Invalid input');
@@ -146,16 +215,17 @@ export async function startRemote(options: RemoteOptions) {
     next.ready = true;
   }
   function validHost(req: IncomingMessage) {
-    try { const url = new URL(`http://${req.headers.host}`); return hosts.has(url.hostname) && Number(url.port || 80) === port && url.host === req.headers.host; }
+    try { const url = new URL(`${protocol}://${req.headers.host}`); return hosts.has(url.hostname) && Number(url.port || (options.tls ? 443 : 80)) === port && url.host === req.headers.host; }
     catch { return false; }
   }
-  function sameOrigin(req: IncomingMessage) { return validHost(req) && req.headers.origin === `http://${req.headers.host}`; }
+  function sameOrigin(req: IncomingMessage) { return validHost(req) && req.headers.origin === `${protocol}://${req.headers.host}`; }
   function reply(res: ServerResponse, status: number, body: unknown) {
     res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body));
   }
-  const server = createServer((req, res) => {
+  const handler = (req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res).catch(() => { if (!res.headersSent) reply(res, 500, { error: 'Request failed' }); else res.destroy(); });
-  });
+  };
+  const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
   server.requestTimeout = 10_000; server.headersTimeout = 10_000;
   async function handle(req: IncomingMessage, res: ServerResponse) {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -181,6 +251,7 @@ export async function startRemote(options: RemoteOptions) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     wss.handleUpgrade(req, socket, head, ws => {
+      ws.on('close', () => { speechJobs.get(ws)?.controller.abort(); speechJobs.delete(ws); });
       access.attach(ws, req); ws.on('pong', () => { if (access.isActive(ws)) alive = true; });
     });
   });
@@ -206,7 +277,7 @@ export async function startRemote(options: RemoteOptions) {
   let closing: Promise<void> | undefined;
   function close() {
     if (closing) return closing;
-    stopped = true; clearInterval(heartbeat); clearInterval(lifecycle); access.dispose();
+    stopped = true; modelDownload?.controller.abort(); speech.close(); for (const job of speechJobs.values()) job.controller.abort(); speechJobs.clear(); clearInterval(heartbeat); clearInterval(lifecycle); access.dispose();
     for (const ws of wss.clients) ws.terminate(); wss.close();
     closing = (async () => {
       const closed = new Promise<void>(resolve => server.close(() => resolve())); server.closeAllConnections();

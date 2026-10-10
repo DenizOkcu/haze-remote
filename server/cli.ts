@@ -2,12 +2,13 @@
 import { parseArgs } from 'node:util';
 import { resolve, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline';
 import { startRemote, privateAddress } from './server.js';
 import { acquireKeepAwake } from './keep-awake.js';
+import { selfSignedTls } from './tls.js';
 import { PIN_MS, CONFIRM_MS, REVIEW_MS } from '../shared/crypto.js';
 
 async function main() {
@@ -18,6 +19,9 @@ async function main() {
     port: { type: 'string', default: '8787' }, cwd: { type: 'string', default: process.cwd() },
     haze: { type: 'string', default: 'haze' },
     project: { type: 'string', multiple: true },
+    https: { type: 'boolean' },
+    'tls-cert': { type: 'string' }, 'tls-key': { type: 'string' },
+    hostname: { type: 'string' },
     'keep-awake': { type: 'boolean', default: true },
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' },
   } });
@@ -27,7 +31,11 @@ async function main() {
 Usage: haze-remote [options] [-- <Haze arguments>]
   --lan            Bind to the sole private IPv4 LAN interface (otherwise use --host)
   --host <address> Specific private/VPN or loopback IP (default: 127.0.0.1)
-  --port <number>  HTTP port (default: 8787; 0 selects a free port)
+  --port <number>  HTTP(S) port (default: 8787; 0 selects a free port)
+  --https          Generate/reuse a local self-signed certificate (requires OpenSSL on first use)
+  --tls-cert <path> HTTPS certificate trusted by the browser (requires --tls-key)
+  --tls-key <path>  HTTPS private key (requires --tls-cert)
+  --hostname <DNS> Exact direct-access DNS name covered by the supplied TLS certificate
   --cwd <path>     Project directory (default: current directory)
   --haze <path>    Haze executable (default: haze on PATH)
   --project <path> Approve another project/worktree for new tabs (repeatable)
@@ -55,6 +63,8 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
     host = addresses[0];
   }
   if (!privateAddress(host)) throw new Error('Use a specific private/VPN or loopback address, not 0.0.0.0, ::, or a public address.');
+  if (!!parsed.values['tls-cert'] !== !!parsed.values['tls-key']) throw new Error('Provide both --tls-cert and --tls-key to enable HTTPS.');
+  if (parsed.values.https && parsed.values['tls-cert']) throw new Error('Choose --https or --tls-cert/--tls-key, not both.');
   const command = parsed.values.haze!;
   let executable: string | undefined;
   const candidates = command.includes('/') ? [resolve(command)] : (process.env.PATH ?? '').split(delimiter).map(dir => join(dir, command));
@@ -62,8 +72,13 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
     try { await access(candidate, constants.X_OK); executable = candidate; break; } catch { /* Next PATH directory. */ }
   }
   if (!executable) throw new Error(`Haze executable not found: ${command}. Install @denizokcu/haze or use --haze /path/to/haze.`);
-  console.log('\nhaze-remote: terminal content will be encrypted. The HTTP-delivered application is NOT protected against active network interception.\nPair only on trusted networks. Local approval grants your OS user’s coding-agent permissions.');
-  const remote = await startRemote({ host, port, cwd: resolve(parsed.values.cwd!), executable,
+  const automaticTls = parsed.values.https ? await selfSignedTls(host) : undefined;
+  const tls = automaticTls ?? (parsed.values['tls-cert'] ? { cert: await readFile(resolve(parsed.values['tls-cert'])), key: await readFile(resolve(parsed.values['tls-key']!)) } : undefined);
+  if (automaticTls) console.log(`\nhaze-remote: using a persistent self-signed HTTPS certificate.\nSHA-256 fingerprint: ${automaticTls.fingerprint}\nOn first use, your browser will warn that the certificate is not trusted. On your trusted private network, verify this server/address and compare the certificate fingerprint before accepting an exception, if your browser allows it.\nThe same certificate is reused for this address across restarts; browser exceptions may not persist. Certificate files are stored under ~/.haze/remote/tls.\nAccepting a warning does not reliably enable microphones. Use a trusted certificate (--tls-cert/--tls-key) if microphone access remains blocked. Local pairing approval is still required.`);
+  console.log(tls
+    ? '\nhaze-remote: HTTPS enabled. Local approval still grants your OS user’s coding-agent permissions.'
+    : '\nhaze-remote: terminal content will be encrypted. The HTTP-delivered application is NOT protected against active network interception.\nPair only on trusted networks. Local approval grants your OS user’s coding-agent permissions.');
+  const remote = await startRemote({ host, port, tls, hostname: parsed.values.hostname, cwd: resolve(parsed.values.cwd!), executable,
     args: split < 0 ? [] : args.slice(split + 1), newArgs: [],
     projects: (parsed.values.project ?? []).map(path => ({ cwd: resolve(path), name: path.split('/').filter(Boolean).at(-1) ?? 'Project' })), assets: fileURLToPath(new URL('../client/', import.meta.url)),
     onPin(pin) {
@@ -72,7 +87,8 @@ network attacker. Use only trusted private networks. Keep this computer awake.`)
     onPending() { console.log(`\nBrowser passed PIN A. Enter the 8-digit code B shown on that device here within ${CONFIRM_MS / 60_000} minutes. Device review gets its own ${REVIEW_MS / 60_000} minutes after code entry.`); },
   });
   const keepAwake = await acquireKeepAwake({ pid: remote.pid, disable: !parsed.values['keep-awake'], log: message => console.log(message) });
-  console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: http://${host.includes(':') ? `[${host}]` : host}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.${keepAwake.enabled ? '\nHost standby is prevented while haze-remote runs (--no-keep-awake to disable).' : ''}\n`);
+  const displayHost = parsed.values.hostname ?? (host.includes(':') ? `[${host}]` : host);
+  console.log(`\nhaze-remote · Haze PID ${remote.pid}\nProject: ${resolve(parsed.values.cwd!)}\nOpen: ${tls ? 'https' : 'http'}://${displayHost}:${remote.port}\n\nLocal commands: pair, revoke, reject, quit. Ctrl+C here stops Haze.\nOne device may pair; disconnects do not reopen pairing or stop Haze.${keepAwake.enabled ? '\nHost standby is prevented while haze-remote runs (--no-keep-awake to disable).' : ''}\n`);
   const local = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   let reviewId: string | undefined;
   let closing = false;
