@@ -3,11 +3,11 @@ import { parseArgs } from 'node:util';
 import { resolve, delimiter, join } from 'node:path';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline';
+import { createInterface as createPrompt } from 'node:readline/promises';
 import qr from 'qrcode-terminal';
 import { startRemote } from './server.js';
-import { selectLanInterface } from './lan.js';
+import { chooseStartupLan, type LanSelection } from './lan.js';
 import { acquireKeepAwake } from './keep-awake.js';
 
 async function main() {
@@ -20,10 +20,11 @@ async function main() {
   }, allowNegative: true });
   if (values.help) {
     console.log(`haze-remote — HTTPS-hosted UI, authenticated LAN WebRTC control of Haze
-Usage: haze-remote --host <IPv4> --subnet <network/prefix> [options] [-- <Haze arguments>]
-  --host <IPv4>       Exact address of your local network interface
-  --subnet <CIDR>     Explicitly permit that interface's OS subnet (e.g. 192.168.1.0/24)
-  --interface <name>  Disambiguate interfaces; VPN/tunnel interfaces are unsupported
+Usage: haze-remote [options] [-- <Haze arguments>]
+Uses the sole eligible LAN interface automatically; asks you to choose if there are several.
+  --host <IPv4>       Optional exact local interface address
+  --subnet <CIDR>     Optional subnet override; must match the OS netmask
+  --interface <name>  Optional interface selection; VPN/tunnel interfaces are unsupported
   --cwd <path>        Project directory (default: current directory)
   --haze <path>       Haze executable (default: haze on PATH)
   --project <path>    Approve an additional project/worktree (repeatable)
@@ -40,11 +41,22 @@ Pairing grants terminal control with your OS user's permissions.`);
   }
   if (values.version) { console.log('@denizokcu/haze-remote 0.0.1'); return; }
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Run in a local interactive terminal. Pairing links grant control of this PC and must not be piped into logs.');
-  if (!values.host || !values.subnet) {
-    const addresses = Object.entries(networkInterfaces()).flatMap(([name, entries]) => (entries ?? []).filter(e => e.family === 'IPv4' && !e.internal).map(e => `${name}: ${e.address} (${e.cidr ?? e.netmask})`));
-    throw new Error(`Choose --host and --subnet explicitly. Local interfaces: ${addresses.join(', ') || 'none'}`);
-  }
-  const lan = selectLanInterface({ address: values.host, subnet: values.subnet, interfaceName: values.interface });
+  let picker: ReturnType<typeof createPrompt> | undefined;
+  let lan: LanSelection;
+  const selection = new AbortController();
+  try {
+    lan = await chooseStartupLan({ address: values.host, subnet: values.subnet, interfaceName: values.interface }, async choices => {
+      if (!picker) {
+        picker = createPrompt({ input: process.stdin, output: process.stdout, terminal: true });
+        picker.once('SIGINT', () => selection.abort());
+        picker.once('close', () => selection.abort());
+      }
+      console.log('\nChoose the network your tablet is connected to:');
+      choices.forEach((choice, index) => console.log(`  ${index + 1}. ${choice.interfaceName.replace(/[\x00-\x1f\x7f]/g, '')}: ${choice.address} (${choice.subnet})`));
+      return picker.question(`Network [1-${choices.length}] (Enter cancels): `, { signal: selection.signal });
+    });
+  } finally { picker?.close(); }
+  console.log(`Using LAN: ${lan.interfaceName} ${lan.address} (${lan.subnet}). Only this network is permitted.`);
   const command = values.haze!;
   let executable: string | undefined;
   const candidates = command.includes('/') ? [resolve(command)] : (process.env.PATH ?? '').split(delimiter).map(dir => join(dir, command));

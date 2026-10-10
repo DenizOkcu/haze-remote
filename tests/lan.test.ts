@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { type NetworkInterfaceInfo } from 'node:os';
-import { selectLanInterface, validateIceCandidate, validateSdpCandidates, validateSelectedRemotePath,
+import { chooseStartupLan, discoverLanInterfaces, selectLanInterface, validateIceCandidate, validateSdpCandidates, validateSelectedRemotePath,
   type LanInterfaceInventory, type LanRemotePath } from '../server/lan.js';
 
 function entry(address = '192.168.50.10', netmask = '255.255.255.0', internal = false): NetworkInterfaceInfo {
@@ -110,4 +110,57 @@ test('actual selected numeric path enforces the exact local interface and remote
     assert.throws(() => validateSelectedRemotePath(selected, { ...path, ...change }));
   }
   assert.throws(() => validateSelectedRemotePath(selected, { ...path, remoteAddress: '::ffff:192.168.50.20' }), /IPv6.*unsupported/);
+});
+
+test('plain startup automatically derives the sole LAN subnet, including the reported /22', async () => {
+  const interfaces = { en0: [{ ...entry('192.168.68.66', '255.255.252.0'), cidr: '192.168.68.66/22' }],
+    lo0: [entry('127.0.0.1', '255.0.0.0', true)], utun4: [entry('10.1.2.3')],
+    public0: [entry('8.8.8.8')], cg0: [entry('100.64.0.1')],
+    ipv6: [{ ...entry(), address: 'fd00::1', family: 'IPv6' as const, netmask: 'ffff:ffff:ffff:ffff::' }],
+  };
+  const lan = await chooseStartupLan({}, async () => { assert.fail('The sole LAN must not prompt'); }, interfaces);
+  assert.equal(lan.interfaceName, 'en0');
+  assert.equal(lan.address, '192.168.68.66');
+  assert.equal(lan.subnet, '192.168.68.0/22');
+  assert.equal(validateIceCandidate(lan, candidate('192.168.71.20')).status, 'numeric-validated');
+  assert.throws(() => validateIceCandidate(lan, candidate('192.168.72.20')), /outside/);
+});
+
+test('multiple eligible interfaces require a choice and retry invalid answers instead of guessing', async () => {
+  const answers = ['not a number', '0', '3', '1.5', '2'];
+  let prompts = 0;
+  const lan = await chooseStartupLan({}, async choices => {
+    prompts++; assert.deepEqual(choices.map(choice => choice.interfaceName), ['en0', 'en1']);
+    return answers.shift()!;
+  }, { en1: inventory.en1, en0: inventory.en0 });
+  assert.equal(prompts, 5);
+  assert.equal(lan.interfaceName, 'en1');
+  await assert.rejects(chooseStartupLan({}, async () => '', inventory), /cancelled/);
+});
+
+test('optional host and interface overrides infer netmask, never fall back after an invalid override', async () => {
+  const noPrompt = async () => { assert.fail('A unique explicit selection must not prompt'); };
+  assert.equal((await chooseStartupLan({ address: '192.168.60.10' }, noPrompt, inventory)).subnet, '192.168.60.0/24');
+  assert.equal((await chooseStartupLan({ interfaceName: 'en1' }, noPrompt, inventory)).address, '192.168.60.10');
+  assert.equal(discoverLanInterfaces({ subnet: '192.168.60.0/24' }, inventory).length, 1);
+  for (const override of [{ address: '192.168.50.99' }, { interfaceName: 'missing' },
+    { address: options.address, subnet: '192.168.0.0/16' }, { address: options.address, interfaceName: 'en1' }]) {
+    await assert.rejects(chooseStartupLan(override, noPrompt, inventory));
+  }
+  const duplicate = { en0: [entry()], en1: [entry()] };
+  assert.throws(() => discoverLanInterfaces({ address: options.address }, duplicate), /disambiguate/);
+  assert.equal(discoverLanInterfaces({ address: options.address, interfaceName: 'en1' }, duplicate)[0].interfaceName, 'en1');
+});
+
+test('discovery excludes malformed masks and unsupported networks even when requested by name', () => {
+  for (const interfaces of [{}, { en0: [entry(options.address, '255.0.255.0')] },
+    { en0: [entry(options.address, '0.0.0.0')] }, { tun0: [entry()] }, { lo0: [entry('127.0.0.1', '255.0.0.0', true)] }]) {
+    assert.throws(() => discoverLanInterfaces({}, interfaces), /No supported/);
+  }
+  assert.throws(() => discoverLanInterfaces({ interfaceName: 'utun4' }, { utun4: [entry()] }), /No supported/);
+  assert.throws(() => discoverLanInterfaces({ address: options.address }, { en0: [entry(options.address, '255.0.255.0')] }), /invalid.*netmask/);
+  for (const [address, mask, subnet] of [['192.168.70.66', '255.255.252.0', '192.168.68.0/22'],
+    ['10.20.31.66', '255.255.240.0', '10.20.16.0/20'], ['192.168.50.10', '255.255.255.254', '192.168.50.10/31']]) {
+    assert.equal(discoverLanInterfaces({}, { en0: [entry(address, mask)] })[0].subnet, subnet);
+  }
 });

@@ -30,12 +30,14 @@ Pairing grants control of Haze with your OS user's permissions, including code e
 npm ci
 npm run build
 cd /path/to/your/project
-node /path/to/haze-remote/dist/server/cli.js --host 192.168.1.20 --subnet 192.168.1.0/24
+node /path/to/haze-remote/dist/server/cli.js
 ```
 
-Choose `--host` as the **exact numeric IPv4 address assigned to the computer's OS LAN interface**. `--subnet` must be the canonical network/prefix matching that interface's **exact OS netmask**, not an arbitrary broader private range. Optionally add `--interface en0` to disambiguate interfaces. Missing or ambiguous selection, mismatched subnet, public/loopback/CGNAT addresses, and unsupported IPv6/VPN/tunnel interfaces produce errors rather than guessing or falling back.
+Just run `haze-remote`. It automatically uses the sole eligible IPv4 LAN interface and derives its canonical subnet from the OS netmask. If several eligible networks are available, a numbered prompt asks which network your tablet uses. The selected interface/address/subnet is printed before starting Haze or contacting the hosted signaling service. For example, `192.168.68.66/22` is correctly restricted to `192.168.68.0/22`.
 
-The browser must reach that same subnet directly. Only UDP host ICE candidates are allowed. Browser `.local` mDNS candidates are provisional until resolved to IPv4 and checked; the actual selected local address must equal `--host` and the remote address must be a peer in the permitted subnet. No STUN, TURN, relay, or off-network fallback exists. This policy is not proof of physical topology and does not configure a firewall.
+Optional `--interface en0` or `--host 192.168.1.20` selects a network without a prompt. `--subnet` is also optional; if supplied, it must exactly match the OS subnet/netmask, not broaden access to an arbitrary private range. Invalid overrides fail rather than falling back. Public/loopback/CGNAT addresses and unsupported IPv6/VPN/tunnel interfaces are excluded; no eligible network produces an actionable error.
+
+The browser must reach that same subnet directly. Only UDP host ICE candidates are allowed. Browser `.local` mDNS candidates are provisional until resolved to IPv4 and checked; the actual selected local address must equal the chosen interface address and the remote address must be a peer in the permitted subnet. No STUN, TURN, relay, or off-network fallback exists. This policy is not proof of physical topology and does not configure a firewall.
 
 ### Pairing and reconnect
 
@@ -96,7 +98,7 @@ An explicitly approved model download belongs to the host: reconnecting or closi
 - Instances in one checkout **share files**. Starting another in an occupied checkout requires an explicit **Allow shared checkout** acknowledgement. For parallel writers, create Git worktrees yourself and approve them at local startup:
 
 ```sh
-haze-remote --host 192.168.1.20 --subnet 192.168.1.0/24 --cwd /path/to/project --project /path/to/other-worktree
+haze-remote --cwd /path/to/project --project /path/to/other-worktree
 # --project may be repeated. The browser cannot supply an arbitrary cwd/executable.
 ```
 
@@ -134,16 +136,16 @@ Git review is removed. Managed worktrees, multi-host routing, persistent fleet o
 npm pack                       # runs typecheck and build
 npm install -g ./denizokcu-haze-remote-0.0.1.tgz
 cd /path/to/your/project
-haze-remote --host 192.168.1.20 --subnet 192.168.1.0/24
+haze-remote
 ```
 
 This implementation has not published the package to npm. If lifecycle scripts are restricted, approve the trusted node-pty/haze-remote scripts. For npm 12 **local** installations, use `npm install-scripts approve @denizokcu/haze-remote node-pty`, then `npm rebuild node-pty @denizokcu/haze-remote`. Checkout approvals are pinned. The reviewed `scripts/prepare-pty.mjs` repairs a missing execute bit on node-pty 1.1.0's macOS prebuilt helper; it never touches Haze or user project files.
 
 ```text
 haze-remote [options] [-- <Haze arguments>]
---host <IPv4>       Exact OS LAN interface address (required)
---subnet <CIDR>     Exact canonical OS subnet/netmask (required)
---interface <name>  Optional interface disambiguation; VPN unsupported
+--host <IPv4>       Optional exact OS LAN interface address
+--subnet <CIDR>     Optional override; must match the OS subnet/netmask
+--interface <name>  Optional interface selection; VPN unsupported
 --no-keep-awake     Disable host power assertion
 --cwd <path>     Default launch directory
 --haze <path>    Default haze on PATH
@@ -155,8 +157,8 @@ haze-remote [options] [-- <Haze arguments>]
 Arguments after `--` are passed directly to Haze without a shell:
 
 ```sh
-haze-remote --host 192.168.1.20 --subnet 192.168.1.0/24 -- --continue
-haze-remote --host 192.168.1.20 --subnet 192.168.1.0/24 --cwd /path/to/project -- --resume SESSION_ID
+haze-remote -- --continue
+haze-remote --cwd /path/to/project -- --resume SESSION_ID
 ```
 
 Those are Haze's existing session features; avoid print-mode arguments for interactive use.

@@ -111,6 +111,51 @@ export function selectLanInterface(
     netmask: entry.netmask, network: subnet.network, prefix: subnet.prefix });
 }
 
+export type LanStartupOptions = { address?: string; subnet?: string; interfaceName?: string };
+
+/** Derive the canonical subnet from the OS netmask, not the host portion of cidr. */
+function osSubnet(entry: NetworkInterfaceInfo): string {
+  const mask = ipv4(entry.netmask);
+  const bits = mask.toString(2).padStart(32, '0');
+  if (!/^1+0*$/.test(bits)) throw new Error('OS interface has an invalid IPv4 netmask');
+  const prefix = bits.indexOf('0') === -1 ? 32 : bits.indexOf('0');
+  return `${dotted((ipv4(entry.address) & mask) >>> 0)}/${prefix}`;
+}
+
+/** Never pick the first private address: return only fully validated LAN choices. */
+export function discoverLanInterfaces(options: LanStartupOptions = {}, inventory: LanInterfaceInventory = networkInterfaces()): LanSelection[] {
+  if (options.address) {
+    const matches = Object.entries(inventory).flatMap(([name, entries]) => (entries ?? [])
+      .filter(entry => entry.address === options.address && (!options.interfaceName || name === options.interfaceName)));
+    if (matches.length !== 1) throw new Error('Address must match exactly one selected OS interface; use --interface to disambiguate.');
+    return [selectLanInterface({ address: options.address, subnet: options.subnet ?? osSubnet(matches[0]), interfaceName: options.interfaceName }, inventory)];
+  }
+  const choices: LanSelection[] = [];
+  for (const [name, entries] of Object.entries(inventory)) {
+    if (options.interfaceName && name !== options.interfaceName) continue;
+    for (const entry of entries ?? []) {
+      if (entry.internal || entry.family !== 'IPv4') continue;
+      try {
+        const selected = selectLanInterface({ address: entry.address, subnet: options.subnet ?? osSubnet(entry), interfaceName: name }, inventory);
+        if (!choices.some(choice => choice.interfaceName === name && choice.address === entry.address)) choices.push(selected);
+      } catch { /* Unsupported interfaces are not automatic-selection candidates. */ }
+    }
+  }
+  if (!choices.length) throw new Error('No supported IPv4 LAN interface found. Connect to Wi-Fi or Ethernet; VPN, IPv6-only, and public-address networks are unsupported. Check any --host, --interface, or --subnet override.');
+  return choices.sort((a, b) => a.interfaceName.localeCompare(b.interfaceName) || a.address.localeCompare(b.address));
+}
+
+/** One eligible interface needs no prompt; multiple interfaces require a local choice. */
+export async function chooseStartupLan(options: LanStartupOptions, ask: (choices: readonly LanSelection[]) => Promise<string>, inventory: LanInterfaceInventory = networkInterfaces()): Promise<LanSelection> {
+  const choices = discoverLanInterfaces(options, inventory);
+  if (choices.length === 1) return choices[0];
+  while (true) {
+    const answer = (await ask(choices)).trim();
+    if (!answer) throw new Error('Network selection cancelled.');
+    if (/^[1-9]\d*$/.test(answer) && Number(answer) <= choices.length) return choices[Number(answer) - 1];
+  }
+}
+
 /** Validate a raw trickle candidate or an SDP a=candidate line. No DNS is performed.
  * A .local result is provisional only, never authorization to send application data.
  */
