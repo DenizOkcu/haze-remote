@@ -114,7 +114,17 @@ export async function deviceHttps(options: {
   }
   let issued;
   try {
-    issued = await acme({ dnsName: hostname, dns, accountKey: state?.accountKey, accountUrl: state?.accountUrl });
+    issued = await acme({ dnsName: hostname, dns, accountKey: state?.accountKey, accountUrl: state?.accountUrl,
+      // Persist the ACME account as soon as it exists so retries never burn new-account rate limits.
+      onAccount: async account => {
+        if (state?.accountUrl) return;
+        const { readFile: read, writeFile: write, mkdir: make, chmod } = await import('node:fs/promises');
+        await make(certificateDirectory, { recursive: true, mode: 0o700 });
+        await chmod(certificateDirectory, 0o700);
+        await write(join(certificateDirectory, 'acme-account-key.pem'), account.accountKey.export({ type: 'sec1', format: 'pem' }), { mode: 0o600 });
+        await write(join(certificateDirectory, 'acme-account'), account.accountUrl + '\n', { mode: 0o600 });
+        await read(join(certificateDirectory, 'acme-account-key.pem')); // Surface write failures immediately.
+      } });
   } catch (error) {
     throw new Error(`Certificate issuance/renewal failed: ${error instanceof Error ? error.message : 'unknown error'}. The registration is retained; retry --https.`);
   }

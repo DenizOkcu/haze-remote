@@ -41,6 +41,7 @@ export function localAcme(options: { leafDays?: number; failValidation?: boolean
     if (!accountKey) throw new Error('kid-based requests require a known account key');
     return accountKey;
   }
+  const caToken = Buffer.from('local-ca-token').toString('base64url'); // RFC 8555 authorization token.
   let nonce = 0, orders = 0;
   let challengeId: string | undefined, challengeDigest: string | undefined, csrDer: Buffer | undefined;
   const request: typeof fetch = async (input, init) => {
@@ -79,15 +80,15 @@ export function localAcme(options: { leafDays?: number; failValidation?: boolean
         assert.deepEqual(payload.identifiers, [{ type: 'dns', value: TEST_HOSTNAME }]);
         return respond(201, { status: 'pending', authorizations: [`${url.origin}/auth/1`] }, { location: `${url.origin}/order/1` });
       }
-      if (url.pathname === '/auth/1') return respond(200, { status: options.failValidation ? 'invalid' : 'valid',
-        challenges: [{ type: 'dns-01', url: `${url.origin}/challenge/1` }], identifier: { value: TEST_HOSTNAME } });
+      if (url.pathname === '/auth/1') return respond(200, { status: 'pending',
+        challenges: [{ type: 'dns-01', url: `${url.origin}/challenge/1`, token: caToken }], identifier: { value: TEST_HOSTNAME } });
       if (url.pathname === '/challenge/1') { assert.deepEqual(payload, {}); return respond(200, { status: 'valid' }); }
       if (url.pathname === '/order/1') {
         if (payload.csr) csrDer = Buffer.from(String(payload.csr), 'base64url');
         return respond(200, { status: 'valid', certificate: `${url.origin}/cert/1` });
       }
     }
-    if (url.pathname === '/auth/1') return respond(200, { status: options.failValidation ? 'invalid' : 'valid', challenges: [{ type: 'dns-01', url: `${url.origin}/challenge/1` }] });
+    if (url.pathname === '/auth/1') return respond(200, { status: options.failValidation ? 'invalid' : 'valid', challenges: [{ type: 'dns-01', url: `${url.origin}/challenge/1`, token: caToken }] });
     if (url.pathname === '/order/1') return respond(200, { status: 'valid', certificate: `${url.origin}/cert/1` });
     if (url.pathname === '/cert/1') {
       assert.ok(csrDer, 'The certificate must be requested after finalizing a CSR');

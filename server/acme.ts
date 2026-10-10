@@ -73,12 +73,15 @@ export type AcmeDns = {
 export async function issueCertificate(options: {
   dnsName: string; dns: AcmeDns; directoryUrl?: string; accountKey?: KeyObject; accountUrl?: string;
   request?: typeof fetch; sleep?: (ms: number) => Promise<void>;
+  onAccount?: (account: { accountKey: KeyObject; accountUrl: string }) => Promise<void> | void;
 }) {
   const request = options.request ?? fetch;
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const dnsName = options.dnsName.toLowerCase();
   const accountKey = options.accountKey ?? generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey;
-  const jwk = createPublicKey(accountKey).export({ format: 'jwk' });
+  const exported = createPublicKey(accountKey).export({ format: 'jwk' }) as { kty: string; crv: string; x: string; y: string; ext?: boolean; key_ops?: string[] };
+  // RFC 7638: the thumbprint covers only the required JWK members in lexicographic order (crv, kty, x, y).
+  const jwk = { crv: exported.crv, kty: exported.kty, x: exported.x, y: exported.y };
   const thumbprint = base64url(sha256(JSON.stringify(jwk)));
   let nonce: string | undefined;
   async function takeNonce(url: string) {
@@ -88,20 +91,24 @@ export async function issueCertificate(options: {
     if ((!response.ok && response.status !== 405) || !value) throw new Error('ACME service is unavailable or returned no nonce');
     return value;
   }
-  async function signed(url: string, payload: Record<string, unknown>, useKid: boolean) {
+  async function signed(url: string, payload: Record<string, unknown> | null, useKid: boolean) {
     const head = { alg: 'ES256', url, nonce: await takeNonce(url), ...(useKid ? { kid: accountUrl } : { jwk }) };
-    const body = `${base64url(JSON.stringify(head))}.${base64url(JSON.stringify(payload))}`;
+    const encodedPayload = payload === null ? '' : base64url(JSON.stringify(payload));
+    const body = `${base64url(JSON.stringify(head))}.${encodedPayload}`;
     const signature = base64url(es256Signature(createSign('SHA256').update(body).sign(accountKey) as Buffer));
     const response = await request(url, { method: 'POST', headers: { 'Content-Type': 'application/jose+json', 'User-Agent': USER_AGENT },
-      body: JSON.stringify({ protected: base64url(JSON.stringify(head)), payload: base64url(JSON.stringify(payload)), signature }) });
+      body: JSON.stringify({ protected: base64url(JSON.stringify(head)), payload: encodedPayload, signature }) });
     const next = response.headers.get('replay-nonce');
     if (next) nonce = next;
-    if (!response.ok) throw new Error(`ACME request failed (HTTP ${response.status})`);
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`ACME request failed (HTTP ${response.status}: ${detail.slice(0, 300)})`);
+    }
     return { json: async () => await response.json(), headers: response.headers };
   }
   const get = async (url: string) => {
     const response = await request(url, { headers: { 'User-Agent': USER_AGENT } });
-    if (!response.ok) throw new Error(`ACME request failed (HTTP ${response.status})`);
+    if (!response.ok) throw new Error(`ACME request failed (HTTP ${response.status}: ${(await response.text()).slice(0, 300)})`);
     return await response.json();
   };
   const directory = await get(options.directoryUrl ?? DIRECTORY);
@@ -112,22 +119,29 @@ export async function issueCertificate(options: {
     const created = await signed(directory.newAccount, { termsOfServiceAgreed: true }, false);
     accountUrl = created.headers.get('location') ?? undefined;
     if (!accountUrl) throw new Error('ACME account creation failed');
+    // Persist immediately: failed issuances must not consume new-account rate limits on retry.
+    await options.onAccount?.({ accountKey, accountUrl });
   }
-  const digest = base64url(sha256(`${base64url(randomBytes(32))}.${thumbprint}`));
+  const ordered = await signed(directory.newOrder, { identifiers: [{ type: 'dns', value: dnsName }] }, true);
+  const orderUrl = ordered.headers.get('location')!;
+  const authorizationUrl = (await ordered.json()).authorizations?.[0];
+  if (!authorizationUrl) throw new Error('ACME order returned no authorization');
+  const authorization = await get(authorizationUrl);
+  const challenge = authorization.challenges?.find((entry: { type: string; token?: string }) => entry.type === 'dns-01');
+  if (!challenge?.url || !challenge.token) throw new Error('ACME authorization does not offer DNS-01');
+  // RFC 8555 §8.4: the TXT value is the digest over the CA's token and this account key's thumbprint.
+  const digest = base64url(sha256(`${challenge.token}.${thumbprint}`));
   const challengeId = await options.dns.createChallenge(digest);
   try {
-    const ordered = await signed(directory.newOrder, { identifiers: [{ type: 'dns', value: dnsName }] }, true);
-    const orderUrl = ordered.headers.get('location')!;
-    const authorizationUrl = (await ordered.json()).authorizations?.[0];
-    if (!authorizationUrl) throw new Error('ACME order returned no authorization');
-    const authorization = await get(authorizationUrl);
-    const challenge = authorization.challenges?.find((entry: { type: string }) => entry.type === 'dns-01');
-    if (!challenge?.url) throw new Error('ACME authorization does not offer DNS-01');
-    await signed(challenge.url, {}, true);
+    await signed(challenge.url, null, true);
     for (let attempt = 0; ; attempt++) {
       const state = await get(authorizationUrl);
       if (state.status === 'valid') break;
-      if (state.status === 'invalid' || attempt >= RETRIES) throw new Error('ACME DNS validation failed or timed out');
+      if (state.status === 'invalid') {
+        const detail = state.challenges?.find((entry: { type: string; error?: { detail?: string } }) => entry.type === 'dns-01')?.error?.detail;
+        throw new Error(`ACME DNS validation failed${detail ? `: ${detail}` : ''}`);
+      }
+      if (attempt >= RETRIES) throw new Error('ACME DNS validation timed out');
       await sleep(BACKOFF[Math.min(attempt, BACKOFF.length - 1)] * 1000);
     }
     const { privateKey: certificateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
