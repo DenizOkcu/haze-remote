@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { spawn } from 'node:child_process';
 import { resolve, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { access, readFile } from 'node:fs/promises';
@@ -13,6 +14,14 @@ import { PIN_MS, CONFIRM_MS, REVIEW_MS } from '../shared/crypto.js';
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === 'dns') {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, [fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../scripts/provision.mjs' : '../../scripts/provision.mjs', import.meta.url)), ...args.slice(1)], { stdio: 'inherit' });
+      child.once('error', reject);
+      child.once('close', code => { process.exitCode = code ?? 1; resolve(); });
+    });
+    return;
+  }
   const split = args.indexOf('--');
   const parsed = parseArgs({ args: split < 0 ? args : args.slice(0, split), options: {
     host: { type: 'string' }, lan: { type: 'boolean' },
@@ -29,6 +38,7 @@ async function main() {
     console.log(`haze-remote — locally approved, encrypted browser control of installed Haze
 
 Usage: haze-remote [options] [-- <Haze arguments>]
+       haze-remote dns <command> (see: haze-remote dns --help)
   --lan            Bind to the sole private IPv4 LAN interface (otherwise use --host)
   --host <address> Specific private/VPN or loopback IP (default: 127.0.0.1)
   --port <number>  HTTP(S) port (default: 8787; 0 selects a free port)

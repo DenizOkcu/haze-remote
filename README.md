@@ -155,7 +155,7 @@ The sidebar sits to the right of the terminal and belongs to the selected parent
 
 This works through a **version-pinned in-process observer**: each Haze instance is launched with a preload that instruments only `@denizokcu/haze` 1.5.0's compiled coordinator/stream modules in memory and reports session identity, worker lifecycle, streamed text-deltas, tool names, and final capsules over a private local socket. Installed Haze files are never modified. With any other Haze version or layout, the sidebar reports unsupported and the terminal keeps working unchanged. `--no-session` still gives worker runs, but session IDs report as ephemeral. Prompts are shown only as each worker's short objective; provider configuration and reasoning are never forwarded. See [observer design and limitations](docs/fleet-and-subagents.md).
 
-Git review is removed. Managed worktrees, multi-host routing, persistent fleet ownership across server restarts, HTTPS support, and cloud relay are not implemented.
+Git review is removed. Managed worktrees, multi-host routing, persistent fleet ownership across server restarts, and cloud relay are not implemented.
 
 ## Install the built npm package
 
@@ -217,3 +217,30 @@ Tests cover PIN/code expiry, cross-rotation budgets, wrong secrets, local-only r
 Tablet-sized Chromium/WebKit tests use a real private LAN HTTP address when available (asserting it is **not** a secure context), plus actual installed Haze `/help`, reload/reconnect, and `/exit`. Installed-Haze tests use an empty temporary HOME/workspace and make no model calls or user-credential reads.
 
 Verified on macOS arm64/Node 26.7.0/Haze 1.5.0. Linux and physical tablet sleep/virtual-keyboard/Wi-Fi behavior remain untested. This application's protocol composition has not received an independent security audit. See [Haze compatibility evidence](docs/haze-compatibility.md).
+
+
+### Direct installation hostname with a trusted certificate
+
+For a locally obtained ACME certificate, keep the bind address private and configure its
+exact DNS hostname separately:
+
+```sh
+haze-remote --host 192.168.1.20 --hostname <installation>.devices.haze.build \
+  --tls-cert /local/path/fullchain.pem --tls-key /local/path/privkey.pem
+```
+
+The certificate must be currently valid for that exact hostname (no wildcard). The printed
+URL uses the hostname, while the listener and peer checks remain private/LAN/VPN-only.
+Unrecognized Host headers and cross-origin WebSockets remain rejected. Pairing and local
+approval are still required. DNS must resolve to the selected reachable private address;
+this does not create a tunnel or route traffic through haze.build.
+
+haze-remote uses only the public API at **https://haze.build** for provisioning:
+use `haze-remote dns --help` for invitation enrollment, explicit address updates,
+local Certbot DNS-01 hooks and unregistration. The API origin is fixed and redirects
+are refused. Follow [trusted device HTTPS setup](docs/device-https.md)
+for staging/production certificate issuance and renewal. Customer certificate/ACME keys
+stay on this computer; the hosted service receives only registration, address and challenge requests.
+Renewed TLS files take effect after a deliberate restart, not automatic hot reload. Public
+DNS and certificate transparency disclose the address/opaque hostname. Microphone permission
+and local model-download consent are unchanged.

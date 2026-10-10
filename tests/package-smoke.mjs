@@ -16,7 +16,7 @@ const wait = async check => {
 try {
   const result = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', dir], { encoding: 'utf8' }));
   const packed = Array.isArray(result) ? result[0] : result['@denizokcu/haze-remote'];
-  for (const path of ['dist/client/index.html', 'dist/server/cli.js', 'dist/server/fleet.js', 'dist/server/haze-observer/preload.js', 'dist/server/haze-observer/loader.js', 'dist/server/haze-observer/runtime.js', 'dist/server/haze-observer/transform.js', 'dist/server/haze-observer/host.js', 'dist/shared/fleet.js', 'dist/shared/observer.js', 'dist/shared/session.js', 'dist/shared/speech.js', 'dist/server/speech.js', 'dist/server/speech-worker.js', 'dist/server/speech-model.js', 'scripts/prepare-pty.mjs']) assert.ok(packed.files.some(f => f.path === path));
+  for (const path of ['dist/client/index.html', 'dist/server/cli.js', 'dist/server/fleet.js', 'dist/server/haze-observer/preload.js', 'dist/server/haze-observer/loader.js', 'dist/server/haze-observer/runtime.js', 'dist/server/haze-observer/transform.js', 'dist/server/haze-observer/host.js', 'dist/shared/fleet.js', 'dist/shared/observer.js', 'dist/shared/session.js', 'dist/shared/speech.js', 'dist/server/speech.js', 'dist/server/speech-worker.js', 'dist/server/speech-model.js', 'scripts/prepare-pty.mjs', 'scripts/provision.mjs', 'docs/device-https.md']) assert.ok(packed.files.some(f => f.path === path));
   assert.ok(!packed.files.some(f => /^(client|server|shared|tests|\.haze)\//.test(f.path)));
   assert.ok(!packed.files.some(f => f.path === 'dist/server/git-review.js' || f.path === 'dist/shared/review.js' || f.path === 'dist/server/subagents.js'), 'Removed review/session-reader code must not survive in build artifacts');
   await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, allowScripts: { 'node-pty@1.1.0': true, '@denizokcu/haze-remote@0.0.1': true } }));
@@ -29,6 +29,10 @@ try {
   const bin = join(dir, 'node_modules/.bin/haze-remote');
   assert.equal(execFileSync(bin, ['--version'], { cwd: dir, encoding: 'utf8' }).trim(), '@denizokcu/haze-remote 0.0.1');
   assert.match(execFileSync(bin, ['--help'], { cwd: dir, encoding: 'utf8' }), /--project/);
+  assert.match(execFileSync(bin, ['dns', '--help'], { cwd: dir, encoding: 'utf8', env: { ...process.env, HAZE_PROVISION_DIRECTORY: join(dir, 'unused-provision') } }), /enroll <private-IPv4>/);
+  const provisioning = await readFile(join(dir, 'node_modules/@denizokcu/haze-remote/scripts/provision.mjs'), 'utf8');
+  assert.match(provisioning, /const API_ORIGIN = 'https:\/\/haze\.build'/);
+  assert.doesNotMatch(provisioning, /Adapted from|https:\/\/api\./);
   await mkdir(join(dir, 'project'));
   const fixture = join(dir, 'agent.mjs');
   await writeFile(fixture, await readFile(resolve('tests/fixtures/agent.mjs')));
