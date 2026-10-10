@@ -41,7 +41,7 @@ export async function startRemote(options: RemoteOptions) {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('macOS and Linux are supported.');
   await stat(resolve(options.assets, 'index.html'));
   if (!privateAddress(options.host)) throw new Error('Bind to a specific private/VPN or loopback address. Wildcard/public bindings are disabled.');
-  if (options.hostname) {
+  if (options.hostname !== undefined) {
     if (options.hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(options.hostname)) throw new Error('Use an exact lowercase DNS hostname, not a URL or wildcard.');
     if (!options.tls) throw new Error('A DNS hostname requires TLS.');
     const certificate = new X509Certificate(options.tls.cert);

@@ -22,6 +22,7 @@ test('direct DNS HTTPS accepts only configured host and same origin, with local 
     await assert.rejects(startRemote({ ...options, tls: undefined }), /requires TLS/);
     await assert.rejects(startRemote({ ...options, hostname: 'other.devices.haze.build' }), /valid for/);
     await assert.rejects(startRemote({ ...options, hostname: '*.devices.haze.build' }), /exact lowercase/);
+    await assert.rejects(startRemote({ ...options, hostname: '' }), /exact lowercase/);
     remote = await startRemote(options);
     const port = remote.port;
     const origin = `https://${hostname}:${port}`;
