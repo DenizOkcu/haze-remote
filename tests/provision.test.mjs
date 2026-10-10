@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { selfSignedTls } from '../server/tls.ts';
 
-const id = 'a'.repeat(32), token = 't'.repeat(43), invitation = 'i'.repeat(43);
+const id = 'a'.repeat(32), token = 't'.repeat(43);
 const hostname = `${id}.devices.haze.build`, challengeId = 'b'.repeat(32), digest = 'd'.repeat(43);
 async function fixture(t) {
   const home = await mkdtemp(join(tmpdir(), 'haze-provision-test-'));
@@ -21,7 +21,7 @@ async function fixture(t) {
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization, body });
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/v1/installations' && req.method === 'POST') {
-      assert.deepEqual(body, { invitation }); assert.equal(req.headers.authorization, undefined);
+      assert.deepEqual(body, {}); assert.equal(req.headers.authorization, undefined);
       res.end(JSON.stringify({ id, hostname, token })); return;
     }
     if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401); res.end('{}'); return; }
@@ -61,10 +61,10 @@ async function fixture(t) {
 
 test('DNS CLI enrolls over trusted HTTPS, protects state, updates address and unregisters without leaking credentials', async t => {
   const f = await fixture(t);
-  const enrolled = await f.run(['enroll', '192.168.1.20'], invitation + '\n');
+  const enrolled = await f.run(['enroll', '192.168.1.20']);
   assert.equal(enrolled.code, 0); assert.equal(enrolled.stdout.trim(), hostname);
   assert.match(enrolled.stderr, /public DNS/);
-  assert.ok(!enrolled.stdout.includes(token) && !enrolled.stderr.includes(invitation));
+  assert.ok(!enrolled.stdout.includes(token));
   assert.equal((await stat(f.directory)).mode & 0o777, 0o700);
   assert.equal((await stat(join(f.directory, 'installation.json'))).mode & 0o777, 0o600);
   assert.equal((await f.run(['hostname'])).stdout.trim(), hostname);
@@ -73,7 +73,7 @@ test('DNS CLI enrolls over trusted HTTPS, protects state, updates address and un
   assert.equal((await f.run(['address', '100.64.1.2'])).code, 0);
   assert.deepEqual(f.requests.at(-1), { method: 'PUT', path: `/v1/installations/${id}/address`, authorization: `Bearer ${token}`, body: { address: '100.64.1.2' } });
   const count = f.requests.length;
-  assert.equal((await f.run(['enroll', '192.168.1.20'], invitation + '\n')).code, 1);
+  assert.equal((await f.run(['enroll', '192.168.1.20'])).code, 1);
   assert.equal(f.requests.length, count, 'Existing identity cannot be replaced');
   assert.equal((await f.run(['unregister'])).code, 0);
   assert.equal(f.requests.at(-1).path, `/v1/installations/${id}`);
@@ -81,9 +81,9 @@ test('DNS CLI enrolls over trusted HTTPS, protects state, updates address and un
   assert.equal((await f.run(['hostname'])).stdout.trim(), hostname, 'Unregister retains local state');
 });
 
-test('partial address failure retains enrollment and allows explicit retry without consuming another invitation', async t => {
+test('partial address failure retains enrollment and allows explicit retry', async t => {
   const f = await fixture(t); f.setAddressFailure(true);
-  const result = await f.run(['enroll', '10.0.0.2'], invitation + '\n');
+  const result = await f.run(['enroll', '10.0.0.2']);
   assert.equal(result.code, 1); assert.match(result.stderr, /HTTP 503/);
   assert.equal((await f.run(['hostname'])).stdout.trim(), hostname);
   f.setAddressFailure(false);
@@ -98,14 +98,14 @@ test('DNS CLI uses only the public API and rejects endpoint overrides and non-pr
   for (const args of [ ['unknown'], ['enroll', 'https://other.example', '10.0.0.2'],
     ['enroll', '127.0.0.1'], ['enroll', '8.8.8.8'], ['enroll', '::1'],
     ['address', '169.254.1.2'], ['hostname', 'extra'] ]) {
-    assert.equal((await f.run(args, invitation + '\n')).code, 1);
+    assert.equal((await f.run(args)).code, 1);
   }
   assert.equal(f.requests.length, 0);
 });
 
 test('Certbot hooks send only DNS-01 digests, wait for matching TXT and clean up the exact challenge', async t => {
   const f = await fixture(t);
-  assert.equal((await f.run(['enroll', '10.0.0.2'], invitation + '\n')).code, 0);
+  assert.equal((await f.run(['enroll', '10.0.0.2'])).code, 0);
   const count = f.requests.length;
   assert.equal((await f.run(['auth'], '', { CERTBOT_DOMAIN: 'other.example', CERTBOT_VALIDATION: digest })).code, 1);
   assert.equal((await f.run(['auth'], '', { CERTBOT_DOMAIN: hostname, CERTBOT_VALIDATION: 'invalid' })).code, 1);

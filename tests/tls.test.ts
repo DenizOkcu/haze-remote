@@ -63,13 +63,13 @@ function request(url: string, ca?: Buffer, host?: string): Promise<number> {
   });
 }
 
-test('--https CLI prints guidance, serves HTTPS, and preserves the certificate across restarts', { timeout: 40_000 }, async () => {
+test('--self-signed-https prints guidance, serves HTTPS, and preserves the certificate across restarts', { timeout: 40_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'haze-tls-cli-'));
   let child: pty.IPty | undefined;
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       let output = '', exited = false;
-      child = pty.spawn(process.execPath, ['--import', 'tsx', resolve('server/cli.ts'), '--https', '--port', '0', '--haze', process.execPath, '--', resolve('tests/fixtures/agent.mjs')], {
+      child = pty.spawn(process.execPath, ['--import', 'tsx', resolve('server/cli.ts'), '--self-signed-https', '--port', '0', '--haze', process.execPath, '--', resolve('tests/fixtures/agent.mjs')], {
         cwd: process.cwd(), name: 'xterm-256color', cols: 120, rows: 40, env: { ...process.env, HOME: home },
       });
       child.onData(data => { output += data; });
@@ -90,11 +90,11 @@ test('--https CLI prints guidance, serves HTTPS, and preserves the certificate a
   } finally { child?.kill(); await rm(home, { recursive: true, force: true }); }
 });
 
-test('--https rejects explicit TLS flags and missing OpenSSL with actionable errors', { timeout: 40_000 }, async () => {
+test('--https rejects conflicting TLS flags with actionable errors', { timeout: 40_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'haze-tls-errors-'));
   let child: pty.IPty | undefined;
   try {
-    for (const flags of [['--tls-cert', 'unused.pem', '--tls-key', 'unused-key.pem'], []]) {
+    for (const flags of [['--tls-cert', 'unused.pem', '--tls-key', 'unused-key.pem'], ['--self-signed-https', '--tls-cert', 'unused.pem', '--tls-key', 'unused-key.pem']]) {
       let output = '', exitCode: number | undefined;
       child = pty.spawn(process.execPath, ['--import', 'tsx', resolve('server/cli.ts'), '--https', '--haze', process.execPath, ...flags], {
         cwd: process.cwd(), name: 'xterm-256color', cols: 120, rows: 40, env: { ...process.env, HOME: home, PATH: home },
@@ -103,9 +103,11 @@ test('--https rejects explicit TLS flags and missing OpenSSL with actionable err
       child.onExit(event => { exitCode = event.exitCode; });
       await until(() => exitCode !== undefined);
       assert.notEqual(exitCode, 0);
-      assert.match(output, flags.length ? /Choose --https or --tls-cert\/--tls-key/ : /Install OpenSSL/);
+      assert.match(output, /Choose --https, --self-signed-https, or --tls-cert\/--tls-key/);
       child = undefined;
     }
-    assert.deepEqual(await readdir(join(home, '.haze', 'remote', 'tls')), [], 'Failed generation leaves no identity or staging directory');
+    const list = async (path: string) => await readdir(path).catch(() => [] as string[]);
+    assert.equal((await list(join(home, '.haze', 'remote', 'tls'))).length, 0, 'Failed startup generates no self-signed identity');
+    assert.equal((await list(join(home, '.haze'))).length, 0, 'Flag errors create no provisioning or TLS state');
   } finally { child?.kill(); await rm(home, { recursive: true, force: true }); }
 });

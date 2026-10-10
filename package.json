@@ -28,7 +28,7 @@
     "build": "npm run build:server && vite build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json",
     "start": "node dist/server/cli.js",
-    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts tests/skills.test.ts tests/configuration.test.ts tests/speech.test.ts tests/tls.test.ts tests/hostname.test.ts tests/provision.test.mjs",
+    "test": "tsx --test tests/security.test.ts tests/server.test.ts tests/input.test.ts tests/fleet.test.ts tests/haze-observer.test.ts tests/keep-awake.test.ts tests/skills.test.ts tests/configuration.test.ts tests/speech.test.ts tests/tls.test.ts tests/hostname.test.ts tests/device-https.test.ts tests/provision.test.mjs",
     "test:browser": "playwright test",
     "test:haze": "tsx tests/haze-smoke.ts",
     "test:package": "npm run build && node tests/package-smoke.mjs",

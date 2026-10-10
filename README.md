@@ -103,7 +103,7 @@ Browser microphones normally require a **secure context**. Plain HTTP LAN/privat
 haze-remote --host 192.168.1.20 --tls-cert /path/to/certificate.pem --tls-key /path/to/private-key.pem
 ```
 
-For quick local HTTPS without managing certificate files yourself:
+For the trusted `haze.build` device flow, register once and let `--https` guide you:
 
 ```sh
 haze-remote --lan --https
@@ -111,7 +111,16 @@ haze-remote --lan --https
 haze-remote --host 192.168.1.20 --https
 ```
 
-`--https` generates a self-signed server certificate using **OpenSSL** on first use, then reuses it across restarts. Certificates and private keys are stored per bind address under `~/.haze/remote/tls` with restricted directory/key permissions. Changing the port keeps the same certificate; changing the address creates a separate one. Certificates last one year. Expired or damaged certificates cause an actionable error rather than silently replacing the saved identity. Do not combine `--https` with `--tls-cert`/`--tls-key`.
+With a registration present, `--https` refreshes the device DNS address on startup and reuses the assigned hostname and locally issued certificate without questions. On first use — after explicit consent, including disclosure that your private address is published in public DNS — it enrolls through the public `https://haze.build` API (open registration — no invitation) and issues a production Let's Encrypt certificate itself via built-in ACME DNS-01: **no Certbot and no contact email are needed**. Certificate and ACME keys stay on this computer; renewal happens automatically inside the final 30 days of validity on the next start. Declining leaves no registration; failures keep the registration for retry and never fall back to an IP URL or HTTP. See [trusted device HTTPS setup](docs/device-https.md).
+
+For quick local HTTPS without a registration or certificate files, use the explicit self-signed mode:
+
+```sh
+haze-remote --lan --self-signed-https
+```
+
+`--self-signed-https` generates a self-signed server certificate using **OpenSSL** on first use, then reuses it across restarts. Certificates and private keys are stored per bind address under `~/.haze/remote/tls` with restricted directory/key permissions. Changing the port keeps the same certificate; changing the address creates a separate one. Certificates last one year. Expired or damaged certificates cause an actionable error rather than silently replacing the saved identity. Do not combine these HTTPS modes or `--tls-cert`/`--tls-key`.
+
 
 The terminal prints the HTTPS address and SHA-256 certificate fingerprint. Your browser will warn that the self-signed certificate is not trusted. On your trusted private network, verify the server/address and compare its certificate fingerprint before accepting an exception, if the browser supports one. Exceptions may not persist even though the certificate does. **Accepting a warning does not reliably enable microphone access**; use a trusted certificate with `--tls-cert`/`--tls-key` if recording remains blocked. haze-remote does not install trust roots or change browser security settings. HTTPS does not relax private-address bindings, matching Host/Origin checks, or local pairing approval.
 
@@ -236,8 +245,8 @@ approval are still required. DNS must resolve to the selected reachable private 
 this does not create a tunnel or route traffic through haze.build.
 
 haze-remote uses only the public API at **https://haze.build** for provisioning:
-use `haze-remote dns --help` for invitation enrollment, explicit address updates,
-local Certbot DNS-01 hooks and unregistration. The API origin is fixed and redirects
+use `haze-remote dns --help` for enrollment (open registration), explicit address updates,
+DNS-01 challenge hooks and unregistration. The API origin is fixed and redirects
 are refused. Follow [trusted device HTTPS setup](docs/device-https.md)
 for staging/production certificate issuance and renewal. Customer certificate/ACME keys
 stay on this computer; the hosted service receives only registration, address and challenge requests.
