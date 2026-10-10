@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { SPEECH_DOWNLOAD_BYTES, SPEECH_MODEL, type SpeechStatus } from '../shared/speech.js';
-import { SpeechCapture, encodeAudio } from './speech-audio';
+import { SpeechCapture } from './speech-audio';
 import type { SpeechRpc } from './speech-rpc';
 import type { InputResult } from './input';
 import './speech.css';
@@ -9,7 +9,8 @@ import { microphoneBlock, microphoneErrorBlock, type MicrophoneBlock } from './m
 
 type Target = { id: string; name: string };
 type Phase = 'closed' | 'checking' | 'consent' | 'downloading' | 'preparing' | 'recording' | 'transcribing' | 'draft';
-export function SpeechInput({ rpc, target, enabled, send }: {
+export function SpeechInput({ rpc, target, enabled, send, setMicrophone }: {
+  setMicrophone: (track: MediaStreamTrack | null) => Promise<void>;
   rpc: SpeechRpc; target: Target; enabled: boolean; send: (targetId: string, text: string) => InputResult;
 }) {
   const [phase, setPhase] = useState<Phase>('closed');
@@ -22,6 +23,7 @@ export function SpeechInput({ rpc, target, enabled, send }: {
   const [uncertain, setUncertain] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [microphoneFailure, setMicrophoneFailure] = useState<MicrophoneBlock>();
+  const recordId = useRef<string | undefined>(undefined);
   const capture = useRef<SpeechCapture | undefined>(undefined);
   const controller = useRef<AbortController | undefined>(undefined);
   const generation = useRef(0);
@@ -31,7 +33,7 @@ export function SpeechInput({ rpc, target, enabled, send }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   function transition(next: Phase) { phaseRef.current = next; setPhase(next); }
-  function stopAudio() { held.current = false; capture.current?.cancel(); capture.current = undefined; }
+  function stopAudio() { if (recordId.current) { rpc.cancelRecording(recordId.current); recordId.current = undefined; } held.current = false; capture.current?.cancel(); capture.current = undefined; }
   function close() {
     generation.current++; stopAudio(); controller.current?.abort(); controller.current = undefined;
     setDraft(''); setError(''); setUncertain(false); transition('closed'); button.current?.focus();
@@ -115,8 +117,11 @@ export function SpeechInput({ rpc, target, enabled, send }: {
       return;
     }
     overlayRecording.current = phaseRef.current === 'draft';
-    const recording = new SpeechCapture(); capture.current = recording; transition('preparing');
+    const recording = new SpeechCapture(setMicrophone); capture.current = recording; transition('preparing');
     try {
+      const id = rpc.newRequestId(); recordId.current = id;
+      await rpc.request({ type: 'speech-record-start' }, undefined, id);
+      if (current !== generation.current || !held.current) { recording.cancel(); return; }
       await recording.start(() => { void release(); });
       if (current !== generation.current || !held.current) { recording.cancel(); return; }
       setMicrophoneFailure(undefined); setPermissionDenied(false); transition('recording');
@@ -135,13 +140,12 @@ export function SpeechInput({ rpc, target, enabled, send }: {
     const recording = capture.current;
     transition('transcribing');
     const abort = new AbortController(); controller.current = abort;
-    let audio: Uint8Array | undefined;
     try {
-      audio = await recording.finish(); capture.current = undefined;
+      await recording.finish(); capture.current = undefined;
       if (current !== generation.current) return;
-      const pending = rpc.request({ type: 'speech-transcribe', audio: encodeAudio(audio) }, abort.signal);
-      audio.fill(0); audio = undefined;
-      const response = await pending;
+      const id = recordId.current; recordId.current = undefined;
+      if (!id) throw new Error('Recording cancelled');
+      const response = await rpc.request({ type: 'speech-record-stop' }, abort.signal, id);
       if (current !== generation.current) return;
       const text = response.text?.trim();
       if (!text) setError('No speech recognized. Hold to record again.');
@@ -149,7 +153,7 @@ export function SpeechInput({ rpc, target, enabled, send }: {
       transition('draft');
     } catch (error) {
       if (current === generation.current) { setError((error as Error).message); transition('draft'); }
-    } finally { audio?.fill(0); recording.cancel(); }
+    } finally { recording.cancel(); }
   }
   async function download() {
     const current = ++generation.current;

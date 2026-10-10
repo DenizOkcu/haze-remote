@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClientSession } from '../shared/session.js';
-import { CONFIRM_MS, REVIEW_MS, PIN_MS, type DeviceCredential } from '../shared/crypto.js';
+import { type DeviceCredential } from '../shared/crypto.js';
 import { loadCredential, saveCredential, forgetCredential } from './credentials';
 import { sendTerminalInput, type InputResult } from './input';
 import { SubagentSidebar, SubagentOverlay } from './SubagentSidebar';
@@ -15,17 +15,15 @@ import { ConfigurationTabs } from './ConfigurationTabs';
 import { SessionsSidebar, SidebarTabs, type SidebarTab } from './SessionsSidebar';
 import { SpeechInput } from './SpeechInput';
 import { SpeechRpc } from './speech-rpc';
+import { BrowserLanSocket } from './browser-lan-socket';
+import { consumePairingFragment } from './pairing-link';
+const pairingLink = consumePairingFragment(window.location, window.history);
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
 type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
 const requestId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 export function App() {
   const [paired, setPaired] = useState<boolean | null>(null);
-  const [code, setCode] = useState('');
-  const [pending, setPending] = useState<{ code?: string; stage: 'confirm' | 'review'; expiresAt: number }>();
-  const [remaining, setRemaining] = useState(CONFIRM_MS / 1000);
-  const [pairingOpen, setPairingOpen] = useState(false);
-  const [serverPaired, setServerPaired] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<Status>('Connecting');
@@ -67,7 +65,8 @@ export function App() {
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const credential = useRef<DeviceCredential | undefined>(undefined);
-  const serverId = useRef('');
+  const serverId = useRef(pairingLink.room);
+  const pairingSecret = useRef(pairingLink.secret);
   const session = useRef<ClientSession | undefined>(undefined);
   const [speechRpc] = useState(() => new SpeechRpc(message => session.current?.send(message) ?? false));
   const closed = useRef<((code: number) => void) | undefined>(undefined);
@@ -143,27 +142,21 @@ export function App() {
   }, [paired]);
 
   function openSession(password: string, remembered?: DeviceCredential) {
-    const connection = new ClientSession(new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`), {
-      serverId: serverId.current, password, credential: remembered,
-      onPending(code, _expiresAt, remainingMs) {
-        setPending({ code, stage: 'confirm', expiresAt: Date.now() + Math.max(0, Math.min(CONFIRM_MS, remainingMs)) });
-      },
-      onReview(_expiresAt, remainingMs) {
-        setPending({ stage: 'review', expiresAt: Date.now() + Math.max(0, Math.min(REVIEW_MS, remainingMs)) });
-      },
+    const connection = new ClientSession(new BrowserLanSocket(serverId.current), {
+      serverId: serverId.current, requireBinding: true, password, credential: remembered,
       async onApproved(value) {
         credential.current = value;
         try { await saveCredential(value); }
         catch { setError('Cannot remember this device. This connection works, but reload will require local revocation and pairing again.'); }
-        if (session.current !== connection || connection.socket.readyState !== WebSocket.OPEN) return;
-        setPending(undefined); setBusy(false); setPaired(true);
+        if (session.current !== connection || connection.socket.readyState !== 1) return;
+        setBusy(false); setPaired(true);
       },
       onError(message) { if (session.current === connection) setError(message); },
       onClose(code) {
         if (session.current !== connection) return;
         session.current = undefined;
         if (closed.current) closed.current(code);
-        else { setPending(undefined); setBusy(false); }
+        else { setBusy(false); }
       },
     });
     session.current = connection;
@@ -174,37 +167,19 @@ export function App() {
     void (async () => {
       try {
         await ClientSession.ready();
-        const res = await fetch('/api/info');
-        if (!res.ok) throw new Error('Cannot reach haze-remote');
-        const info = await res.json();
+        if (!serverId.current) throw new Error('Open the pairing link from your computer.');
         let stored: DeviceCredential | undefined;
-        try { stored = await loadCredential(); } catch { /* Memory-only pairing still works. */ }
+        try { stored = await loadCredential(serverId.current); } catch { /* Memory-only pairing still works. */ }
         if (cancelled) return;
-        serverId.current = info.serverId;
-        setPairingOpen(info.pairing.open); setServerPaired(info.paired);
-        if (stored?.serverId === info.serverId && info.paired) { credential.current = stored; setPaired(true); }
-        else { void forgetCredential().catch(() => {}); setPaired(false); }
+        if (stored?.serverId === serverId.current) { credential.current = stored; pairingSecret.current = ''; pairingLink.secret = ''; setPaired(true); }
+        else {
+          setPaired(false);
+          if (pairingSecret.current) { setBusy(true); openSession(pairingSecret.current); pairingSecret.current = ''; pairingLink.secret = ''; }
+        }
       } catch { if (!cancelled) { setError('Cannot initialize encrypted connection. Check the computer and reload.'); setPaired(false); } }
     })();
     return () => { cancelled = true; session.current?.close(); };
   }, []);
-  useEffect(() => {
-    if (paired !== false || busy) return;
-    const poll = setInterval(() => {
-      void fetch('/api/info').then(r => r.json()).then(info => {
-        serverId.current = info.serverId;
-        setPairingOpen(info.pairing.open); setServerPaired(info.paired);
-      }).catch(() => {});
-    }, 2000);
-    return () => clearInterval(poll);
-  }, [paired, busy]);
-  useEffect(() => {
-    if (!pending) return;
-    const tick = () => setRemaining(Math.max(0, Math.ceil((pending.expiresAt - Date.now()) / 1000)));
-    tick(); const timer = setInterval(tick, 250);
-    return () => clearInterval(timer);
-  }, [pending]);
-
   useEffect(() => {
     if (!paired || !host.current) return;
     let disposed = false, connecting = false, reconnectAllowed = true, ready = false, processExited = false;
@@ -218,7 +193,7 @@ export function App() {
     const send = (message: unknown) => session.current?.send(message) ?? false;
     input.current = data => {
       const target = display.current;
-      const result = sendTerminalInput(data, ready && !processExited && viewRef.current === 'terminal' && session.current?.socket.readyState === WebSocket.OPEN,
+      const result = sendTerminalInput(data, ready && !processExited && viewRef.current === 'terminal' && session.current?.socket.readyState === 1,
         message => send({ ...message, instanceId: target.id, viewId: target.viewId }));
       if (result === 'too-large') setError('Paste is too large (64 KiB maximum). Split it into smaller pieces.');
       else if (result !== 'queued') setError(result === 'partial'
@@ -237,7 +212,7 @@ export function App() {
     const dataListener = term.onData(data => { input.current(data); });
     const disconnectInput = () => { ready = false; term.options.disableStdin = true; };
     fleetRequest.current = request => {
-      if (!ready || pendingOperation.current || session.current?.socket.readyState !== WebSocket.OPEN) return;
+      if (!ready || pendingOperation.current || session.current?.socket.readyState !== 1) return;
       const navigation = request.type === 'instance-create' || request.type === 'instance-select';
       pendingOperation.current = { id: request.requestId, type: request.type }; setOperation(request.type); setError('');
       if (navigation) { disconnectInput(); setStatus('Switching'); }
@@ -254,7 +229,7 @@ export function App() {
     };
     const dropCredential = () => {
       reconnectAllowed = false; credential.current = undefined;
-      void forgetCredential().catch(() => {}); setPending(undefined); setPaired(false);
+      void forgetCredential(serverId.current).catch(() => {}); setPaired(false);
       setProject(''); setPid(undefined); lastContact.current = undefined; setRetryAt(undefined);
       seen.current.clear(); display.current = { id: '', viewId: '' };
       setFleet(undefined); setActiveId(''); setShowCreate(false); setWatchedWorker(undefined); setWorkerOutput(undefined); finishOperation();
@@ -297,7 +272,7 @@ export function App() {
           setProject(message.cwd); setPid(message.pid);
           processExited = message.exit !== null; setExitCode(message.exit?.exitCode);
           term.write(message.data, () => {
-            if (disposed || session.current !== connection || display.current !== target || connection.socket.readyState !== WebSocket.OPEN) return;
+            if (disposed || session.current !== connection || display.current !== target || connection.socket.readyState !== 1) return;
             ready = true; attempt = 0; lastPong = Date.now(); setRetryAt(undefined);
             term.options.disableStdin = processExited; setStatus(processExited ? 'Exited' : 'Connected'); fitTerminal();
             if (focusSelectedTab) document.getElementById(`tab-${target.id}`)?.focus();
@@ -335,18 +310,10 @@ export function App() {
       });
     }
     async function connect() {
-      if (disposed || connecting || !reconnectAllowed || (session.current && session.current.socket.readyState !== WebSocket.CLOSED)) return;
+      if (disposed || connecting || !reconnectAllowed || (session.current && session.current.socket.readyState !== 3)) return;
       connecting = true; disconnectInput(); setRetryAt(undefined); setStatus(attempt ? 'Reconnecting' : 'Connecting');
       try {
         if (!credential.current) { dropCredential(); return; }
-        const res = await fetch('/api/info', { signal: AbortSignal.timeout(10_000) }); if (!res.ok) throw new Error();
-        const info = await res.json(); if (disposed) return;
-        if (info.serverId !== credential.current.serverId || !info.paired) {
-          setError(info.serverId !== credential.current.serverId
-            ? 'The server restarted or changed. Approve this browser locally again.'
-            : 'This device is no longer approved. On the computer, type pair to reopen pairing when no device is approved.');
-          dropCredential(); return;
-        }
         attach(openSession(credential.current.password, credential.current));
       } catch { if (!disposed) schedule(); }
       finally { connecting = false; }
@@ -370,19 +337,19 @@ export function App() {
       clearTimeout(retry); void connect();
     };
     const heartbeat = setInterval(() => {
-      if (session.current?.socket.readyState !== WebSocket.OPEN) return;
+      if (session.current?.socket.readyState !== 1) return;
       if (Date.now() - lastPong > 30_000) { session.current.close(); return; }
       if (ready) send({ type: 'ping' });
     }, 10_000);
     const wake = () => {
       if (document.visibilityState !== 'visible' || !reconnectAllowed || connecting) return;
       const socket = session.current?.socket;
-      if (socket?.readyState === WebSocket.OPEN && Date.now() - lastPong > 30_000) session.current?.close();
-      else if (!socket || socket.readyState === WebSocket.CLOSED) { clearTimeout(retry); void connect(); }
+      if (socket?.readyState === 1 && Date.now() - lastPong > 30_000) session.current?.close();
+      else if (!socket || socket.readyState === 3) { clearTimeout(retry); void connect(); }
     };
     const offline = () => {
       if (disposed || !reconnectAllowed) return;
-      // A WebSocket close handshake can stall while the browser is offline.
+      // A connection can stall while the browser is offline.
       // Do not advertise Connected or leave controls enabled until onclose fires.
       disconnectInput(); finishOperation(); disconnectSkills(); setStatus('Reconnecting'); setRetryAt(undefined);
       session.current?.close();
@@ -401,14 +368,14 @@ export function App() {
 
   async function pair(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
-    try { await ClientSession.ready(); openSession(code.trim()); setCode(''); }
+    try { await ClientSession.ready(); openSession(pairingSecret.current); pairingSecret.current = ''; pairingLink.secret = ''; }
     catch { setError('Cannot start encrypted pairing'); setBusy(false); }
   }
   function unpair() {
-    if (!window.confirm('Unpair this browser? Haze keeps running, but remote access will end and pairing stays closed. To reconnect, type pair on the computer and approve locally again.')) return;
+    if (!window.confirm('Unpair this browser? Haze keeps running, but remote access will end and pairing stays closed. To reconnect, type pair on the computer and generate a new pairing link.')) return;
     try {
       if (!session.current?.send({ type: 'unpair' })) throw new Error('Not sent');
-      credential.current = undefined; void forgetCredential().catch(() => {});
+      credential.current = undefined; void forgetCredential(serverId.current).catch(() => {});
     } catch { setError('Unpair was not confirmed. Reconnect or revoke locally on the computer.'); }
   }
   const connected = status === 'Connected';
@@ -419,26 +386,12 @@ export function App() {
   if (paired === null) return <main className="pair-screen"><p role="status">Initializing encrypted connection…</p></main>;
   if (!paired) return <main className="pair-screen"><section className="pair-card">
     <div className="wordmark">haze<span> / remote</span></div>
-    <h1>Your terminal. Locally approved.</h1>
-    {pending ? <>
-      {pending.stage === 'confirm' ? <>
-        <p>Enter this code B using the keyboard on the computer running haze-remote. You have two minutes; entering it starts a separate two-minute device review.</p>
-        <div className="confirmation-code" aria-label="Code B">{remaining > 0 ? pending.code : 'Expired'}</div>
-      </> : <p>Code B confirmed. Review the device information on the computer, then type <strong>approve</strong> or <strong>reject</strong>. Terminal access is still disabled.</p>}
-      <p role="status">{pending.stage === 'confirm' ? 'Enter code B on computer' : 'Awaiting local approval'} · {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')} remaining</p>
-    </> : <>
-      <p>Enter the current PIN A from your computer. It rotates every {PIN_MS / 1000} seconds. No terminal access is granted until you also confirm on the computer.</p>
-      {!pairingOpen && <p className="notice">{serverPaired ? 'A device is already paired. Revoke it locally before pairing another.' : 'Pairing closed. Type pair in the computer’s haze-remote terminal.'}</p>}
-      <form onSubmit={pair}>
-        <label htmlFor="code">PIN A</label>
-        <input id="code" value={code} onChange={e => setCode(e.target.value)} placeholder="8 digits shown on the computer" inputMode="numeric" pattern="[0-9]{8}" maxLength={8} autoComplete="off" required disabled={busy} />
-        <button className="primary" type="submit" disabled={busy || !pairingOpen}>{busy ? 'Verifying PIN…' : 'Pair this browser'}</button>
-      </form>
-    </>}
-    {busy && <button onClick={() => session.current?.close()}>Cancel pairing</button>}
+    <h1>Your terminal. On your network.</h1>
+    <p>Open the pairing link shown on your computer. Keep both devices on the same trusted private network.</p>
+    <form onSubmit={pair}><button className="primary" disabled={busy || !pairingSecret.current}>{busy ? 'Connecting securely…' : 'Connect'}</button></form>
+    {busy && <button onClick={() => session.current?.close()}>Cancel connection</button>}
     {error && <p role="alert" className="error">{error}</p>}
-    <details className="readiness"><summary>Before pairing</summary><ul><li>Keep the computer awake and haze-remote running.</li><li>Use the printed address on a trusted private network.</li><li>Have the computer’s local terminal available for code B and approve.</li></ul></details>
-    <p className="fine-print">Terminal transport is encrypted. {location.protocol === 'https:' ? 'HTTPS protects page delivery when the browser trusts the server certificate.' : 'The HTTP-delivered page can still be modified by an active network attacker.'} Pair only on trusted networks. Approval grants your computer’s permissions.</p>
+    <p className="fine-print">Terminal transport is encrypted. Keep the computer awake and remote access running. A pairing link grants access to your computer; do not share it.</p>
   </section></main>;
   return <main className="workspace">
     <header className="app-header">
@@ -510,7 +463,7 @@ export function App() {
     <div className="terminal-toolbar">
       <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="terminal-title">{activeInstance?.name ?? 'Loading fleet…'}<small> · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running</small></span>
-      <SpeechInput rpc={speechRpc} target={{ id: activeId, name: activeInstance?.name ?? 'Haze' }} enabled={connected && !operation && view === 'terminal' && activeInstance?.state === 'running'} send={(id, text) => {
+      <SpeechInput setMicrophone={track => { const socket = session.current?.socket; if (!(socket instanceof BrowserLanSocket)) { track?.stop(); return Promise.reject(new Error('Audio connection unavailable')); } return socket.setMicrophone(track); }} rpc={speechRpc} target={{ id: activeId, name: activeInstance?.name ?? 'Haze' }} enabled={connected && !operation && view === 'terminal' && activeInstance?.state === 'running'} send={(id, text) => {
         if (id !== display.current.id || !text.trim() || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) return 'not-sent';
         if (new TextEncoder().encode(text).byteLength > 8000) return 'too-large';
         return input.current(`\x1b[200~${text}\x1b[201~\r`);

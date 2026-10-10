@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { WebSocket } from 'ws';
+import { TestSocket as WebSocket, peerHarness } from './helpers.js';
 import { startRemote } from '../server/server.js';
 import { connection, until, delay } from './helpers.js';
 import { isFleetRequest, MAX_INSTANCES } from '../shared/fleet.js';
@@ -20,24 +20,17 @@ async function fixture() {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'haze-fleet-')));
   const cwd = join(home, 'primary'), second = join(home, 'second');
   await mkdir(cwd); await mkdir(second);
-  const remote = await startRemote({ host: '127.0.0.1', port: 0, cwd, projects: [{ cwd: second, name: 'Other worktree' }],
-    executable: process.execPath, args: [resolve('tests/fixtures/observed-agent.mjs')], newArgs: [resolve('tests/fixtures/observed-agent.mjs')], assets: resolve('tests/fixtures'),
+  const transport = peerHarness();
+  const remote = await startRemote({ ...transport, cwd, projects: [{ cwd: second, name: 'Other worktree' }],
+    executable: process.execPath, args: [resolve('tests/fixtures/observed-agent.mjs')], newArgs: [resolve('tests/fixtures/observed-agent.mjs')],
     env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
-  return { home, cwd, second, remote, origin: `http://127.0.0.1:${remote.port}`,
+  return { home, cwd, second, remote, transport,
     async cleanup() { await remote.close(); await rm(home, { recursive: true, force: true }); } };
 }
 const latestSnapshot = (c: Awaited<ReturnType<typeof connection>>) => c.messages.filter(message => message.type === 'snapshot').at(-1);
 async function approve(f: Awaited<ReturnType<typeof fixture>>) {
-  const c = await connection(f.origin, f.remote.local.pin()!.pin);
-  await until(() => !!c.state.code);
+  const c = await connection(f, f.remote.local.pin()!.pin);
   assert.equal(c.session.send({ type: 'instance-create', requestId: 'unapproved', name: 'Denied', projectId: 'project-1', allowShared: true }), false);
-  assert.equal(c.messages.length, 0);
-  // Under parallel-suite load the review enrollment message can trail the code; without it
-  // confirm() throws ("enrollment is not ready"), so wait for enrollment before confirming.
-  await until(() => {
-    try { f.remote.local.approve(f.remote.local.confirm(c.state.code!).id); return true; }
-    catch { return false; }
-  });
   await until(() => !!latestSnapshot(c));
   return c;
 }
@@ -48,9 +41,6 @@ test('fleet instances have isolated PTYs, scoped input/resize, idempotent creati
     const primary = latestSnapshot(c);
     assert.equal(primary.instanceId, f.remote.instanceId);
     assert.equal(primary.fleet.instances.length, 1);
-    const publicInfo = await (await fetch(f.origin + '/api/info')).json();
-    assert.ok(!('fleet' in publicInfo) && !('projects' in publicInfo));
-    assert.equal((await fetch(f.origin + '/api/fleet')).status, 404);
     c.session.send({ type: 'input', instanceId: primary.instanceId, viewId: primary.viewId, data: 'ONLY-PRIMARY' });
     await until(() => c.output().includes('ONLY-PRIMARY'));
     c.session.send({ type: 'instance-create', requestId: 'shared-denied', name: 'Denied', projectId: 'project-1', allowShared: false });
@@ -102,7 +92,7 @@ test('fleet instances have isolated PTYs, scoped input/resize, idempotent creati
     const credential = c.state.credential!;
     c.session.close(); await until(() => c.ws.readyState === WebSocket.CLOSED);
     process.kill(primary.pid, 0); process.kill(second.pid, 0);
-    const resumed = await connection(f.origin, credential.password, credential); sockets.push(resumed.ws);
+    const resumed = await connection(f, credential.password, credential); sockets.push(resumed.ws);
     await until(() => !!latestSnapshot(resumed));
     assert.equal(latestSnapshot(resumed).instanceId, second.instanceId);
     assert.equal(latestSnapshot(resumed).pid, second.pid);
@@ -113,7 +103,7 @@ test('fleet instances have isolated PTYs, scoped input/resize, idempotent creati
     resumed.session.send({ type: 'instance-close', requestId: 'close', instanceId: second.instanceId });
     await until(() => latestSnapshot(resumed)?.instanceId === primary.instanceId);
     assert.equal(latestSnapshot(resumed).fleet.instances.length, 1);
-    f.remote.local.revoke(); await until(() => resumed.state.closed === 4001);
+    await f.remote.local.revoke(); await until(() => resumed.state.closed === 4001);
     assert.equal(resumed.session.send(create), false);
     process.kill(primary.pid, 0);
     await f.remote.close(); assert.throws(() => process.kill(primary.pid, 0));

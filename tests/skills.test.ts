@@ -1,3 +1,4 @@
+import { peerHarness } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, link } from 'node:fs/promises';
@@ -61,19 +62,17 @@ test('skills reject browser paths, symlinks, hardlinks, oversized files, and uns
   } finally { await f.cleanup(); }
 });
 
-test('skill data and writes require local approval and use encrypted transport', async () => {
+test('skill data and writes require QR-secret enrollment and use encrypted transport', async () => {
   const f = await fixture();
-  const remote = await startRemote({ host: '127.0.0.1', port: 0, cwd: f.cwd, executable: process.execPath,
-    args: [resolve('tests/fixtures/agent.mjs')], assets: resolve('tests/fixtures'), env: { HOME: f.home, PATH: process.env.PATH! } });
+  const transport = peerHarness();
+  const remote = await startRemote({ ...transport, cwd: f.cwd, executable: process.execPath,
+    args: [resolve('tests/fixtures/agent.mjs')], env: { HOME: f.home, PATH: process.env.PATH! } });
   let c: Awaited<ReturnType<typeof connection>> | undefined;
   try {
     await f.create('private-workflow');
-    const origin = `http://127.0.0.1:${remote.port}`;
-    assert.equal((await fetch(origin + '/api/skills')).status, 404);
-    c = await connection(origin, remote.local.pin()!.pin);
-    await until(() => !!c!.state.code);
+
+    c = await connection({ remote, transport }, remote.local.pin()!.pin);
     assert.equal(c.messages.length, 0);
-    const review = remote.local.confirm(c.state.code!); remote.local.approve(review.id);
     await until(() => c!.messages.some(message => message.type === 'snapshot'));
     c.session.send({ type: 'skills-list', requestId: 'catalog' });
     await until(() => c!.messages.some(message => message.requestId === 'catalog'));

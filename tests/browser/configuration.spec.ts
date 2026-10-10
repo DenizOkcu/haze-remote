@@ -3,12 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startRemote } from '../../server/server.js';
+import { peerHarness } from '../helpers.js';
+import { appFixture } from './app-fixture.js';
+test.use({ launchOptions: { args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] } });
+let app: Awaited<ReturnType<typeof appFixture>>;
 
 let remote: Awaited<ReturnType<typeof startRemote>>;
 let home = '';
 let base = '';
-let origin = '';
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }) => {
+  const transport = peerHarness();
   base = await mkdtemp(join(tmpdir(), 'haze-config-browser-'));
   home = join(base, 'home');
   const cwd = join(base, 'project');
@@ -16,23 +20,14 @@ test.beforeEach(async () => {
   await writeFile(join(home, '.haze', 'settings.json'), JSON.stringify({
     providers: [{ name: 'existing-cloud', url: 'https://existing.example/v1', key: 'SECRET', models: ['old-model'] }],
   }));
-  remote = await startRemote({ host: '127.0.0.1', port: 0, cwd, executable: process.execPath,
+  remote = await startRemote({ lan: transport.lan, peerFactory: transport.peerFactory, cwd, executable: process.execPath,
     args: [resolve('tests/fixtures/agent.mjs')], newArgs: [resolve('tests/fixtures/agent.mjs')],
-    assets: resolve('dist/client'), env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
-  origin = `http://127.0.0.1:${remote.port}`;
+    env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' } });
+  app = await appFixture(page, transport);
 });
-test.afterEach(async () => { if (remote) await remote.close(); if (base) await rm(base, { recursive: true, force: true }); });
+test.afterEach(async () => { await app?.close(); if (remote) await remote.close(); if (base) await rm(base, { recursive: true, force: true }); });
 
-async function pair(page: import('@playwright/test').Page) {
-  await page.goto(origin);
-  await page.getByLabel('PIN A', { exact: true }).fill(remote.local.pin()!.pin);
-  await page.getByRole('button', { name: 'Pair this browser' }).click();
-  await expect(page.getByLabel('Code B')).toHaveText(/^\d{8}$/);
-  const code = await page.getByLabel('Code B').textContent();
-  const review = remote.local.confirm(code!);
-  remote.local.approve(review.id);
-  await expect(page.getByRole('status')).toHaveText('Connected');
-}
+async function pair(_page: import('@playwright/test').Page) { await app.pair(remote); }
 
 test('providers tab edits providers with write-only keys and manages defaults', async ({ page }) => {
   await pair(page);

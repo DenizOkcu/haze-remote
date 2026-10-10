@@ -1,3 +1,4 @@
+import { peerHarness } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -76,21 +77,20 @@ test('settings-save validates values, maps nested fields, supports unset, and pr
   } finally { await f.cleanup(); }
 });
 
-test('configuration and sessions require local approval and travel only encrypted; invalid requests are rejected', async () => {
+test('configuration and sessions require QR-secret enrollment and travel only encrypted; invalid requests are rejected', async () => {
   assert.equal(isManagementRequest({ type: 'provider-remove', requestId: 'a', revision: '/bad', name: 'x' }), false);
   assert.equal(isManagementRequest({ type: 'settings-save', requestId: 'a', revision: 'f'.repeat(64), settings: { theme: 'x' } }), true);
   assert.equal(isManagementRequest({ type: 'sessions-list', requestId: 'a', projectId: '../escape' }), false);
   const f = await fixture();
-  const remote = await startRemote({ host: '127.0.0.1', port: 0, cwd: f.cwd, executable: process.execPath,
-    args: [resolve('tests/fixtures/agent.mjs')], assets: resolve('tests/fixtures'), env: { HOME: f.home, PATH: process.env.PATH! } });
+  const transport = peerHarness();
+  const remote = await startRemote({ ...transport, cwd: f.cwd, executable: process.execPath,
+    args: [resolve('tests/fixtures/agent.mjs')], env: { HOME: f.home, PATH: process.env.PATH! } });
   let c: Awaited<ReturnType<typeof connection>> | undefined;
   try {
     await mkdir(join(f.home, '.haze'));
     await writeFile(f.settings, JSON.stringify({ providers: [provider('private-cloud', { key: 'SECRET' })] }));
-    const origin = `http://127.0.0.1:${remote.port}`;
-    c = await connection(origin, remote.local.pin()!.pin);
-    await until(() => !!c!.state.code);
-    const review = remote.local.confirm(c.state.code!); remote.local.approve(review.id);
+
+    c = await connection({ remote, transport }, remote.local.pin()!.pin);
     await until(() => c!.messages.some(message => message.type === 'snapshot'));
     c.session.send({ type: 'configuration-read', requestId: 'read' });
     await until(() => c!.messages.some(message => message.requestId === 'read'));

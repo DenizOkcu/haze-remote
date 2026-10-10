@@ -1,4 +1,4 @@
-import { randomInt, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { CONFIRM_MS, PIN_MS, REVIEW_MS, confirmationCode, opaque, registration } from '../shared/crypto.js';
 
 export interface DeviceReview {
@@ -25,11 +25,13 @@ export class PairingGate {
   private generation = 0;
   private attempts = 0;
   private enabled = true;
+  private finished = false;
   private candidate?: Candidate;
   constructor(private readonly now = () => Date.now(), private readonly changed?: () => void) { this.rotate(); }
-  localPin() { return this.enabled && this.attempts < 5 ? { pin: this.pin, expiresAt: this.expiresAt } : null; }
+  localPin() { this.tick(); return this.enabled && !this.finished && this.attempts < 5 ? { pin: this.pin, expiresAt: this.expiresAt } : null; }
   private rotate() {
-    this.pin = randomInt(100_000_000).toString().padStart(8, '0');
+    this.finished = false;
+    this.pin = randomBytes(32).toString('hex');
     this.record = registration(this.setup, 'pair', this.pin);
     this.expiresAt = this.now() + PIN_MS;
     this.generation++;
@@ -37,24 +39,34 @@ export class PairingGate {
   }
   tick() {
     if (this.candidate && this.now() >= this.candidate.expiresAt) this.reject();
-    if (this.enabled && this.attempts < 5 && this.now() >= this.expiresAt) this.rotate();
+    if (this.enabled && this.now() >= this.expiresAt) {
+      this.enabled = false; this.pin = this.record = ''; this.changed?.();
+    }
   }
   begin(request: string) {
     this.tick();
-    if (!this.enabled || this.attempts >= 5) throw new Error('Pairing closed. Reopen it locally on the computer.');
+    if (!this.enabled || this.finished || this.attempts >= 5) throw new Error('Pairing closed. Reopen it locally on the computer.');
     if (this.candidate) throw new Error('A pairing request is awaiting local approval.');
-    // Charge every handshake start, including those abandoned by a wrong-PIN
-    // client. Rotation never resets the guessing/DoS budget.
+    // Charge every handshake start, including abandoned attempts. Only an
+    // explicit local reopen resets this budget or creates a fresh secret.
     this.attempts++;
     const result = opaque.server.startLogin({ serverSetup: this.setup, registrationRecord: this.record, userIdentifier: 'pair', startLoginRequest: request });
     return { ...result, generation: this.generation, expiresAt: this.expiresAt };
   }
   finish(challenge: { generation: number; expiresAt: number; serverLoginState: string }, request: string) {
-    if (!this.enabled || this.candidate || this.now() >= challenge.expiresAt || challenge.generation !== this.generation) throw new Error('Pairing challenge expired or unavailable');
-    return opaque.server.finishLogin({ serverLoginState: challenge.serverLoginState, finishLoginRequest: request });
+    if (!this.enabled || this.finished || this.candidate || this.now() >= challenge.expiresAt || challenge.generation !== this.generation) throw new Error('Pairing challenge expired or unavailable');
+    const result = opaque.server.finishLogin({ serverLoginState: challenge.serverLoginState, finishLoginRequest: request });
+    // Consume on successful proof, not on eventual approval. Concurrent or
+    // replayed handshakes cannot reuse the secret while enrollment is pending.
+    this.finished = true;
+    this.pin = this.record = '';
+    return result;
   }
   pending(sessionKey: string, review: Omit<DeviceReview, 'id' | 'expiresAt'>, onApprove: () => void, onReject: () => void) {
+    this.tick();
     if (this.candidate || !this.enabled) throw new Error('Pairing unavailable');
+    // A proved pairing secret is single-use, even if enrollment is rejected.
+    this.enabled = false; this.pin = this.record = '';
     this.candidate = { ...review, id: randomBytes(16).toString('hex'), expiresAt: this.now() + CONFIRM_MS, code: confirmationCode(sessionKey), verified: false, onApprove, onReject };
     return this.candidate;
   }
@@ -88,7 +100,7 @@ export class PairingGate {
   reopen() {
     this.reject(); this.attempts = 0; this.enabled = true; this.rotate();
   }
-  status() { this.tick(); return { open: this.enabled && this.attempts < 5, pending: !!this.candidate }; }
+  status() { this.tick(); return { open: this.enabled && !this.finished && this.attempts < 5, pending: !!this.candidate }; }
 }
 
 export function describeDevice(peer: string, userAgent = '') {

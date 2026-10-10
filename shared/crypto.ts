@@ -7,6 +7,20 @@ export const PROTOCOL = 'haze-remote/2';
 export const PIN_MS = 60_000;
 export const CONFIRM_MS = 120_000;
 export const REVIEW_MS = 120_000;
+export interface ChannelBinding { clientFingerprint: string; serverFingerprint: string }
+
+// DTLS SHA-256 fingerprints are role ordered, never lexically sorted. Accept
+// SDP's colon-delimited form (with an optional sha-256 label) and normalize it.
+export function canonicalChannelBinding(binding: ChannelBinding): string {
+  const normalize = (value: string) => {
+    if (typeof value !== 'string') throw new Error('Invalid SHA-256 DTLS fingerprint');
+    const hex = value.trim().replace(/^sha-256\s+/i, '').replace(/:/g, '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(hex)) throw new Error('Invalid SHA-256 DTLS fingerprint');
+    return hex;
+  };
+  return JSON.stringify([`${PROTOCOL}/dtls/sha-256`, normalize(binding.clientFingerprint), normalize(binding.serverFingerprint)]);
+}
+
 export type DeviceCredential = { serverId: string; deviceId: string; password: string; serverPublicKey: string };
 
 // OPAQUE's session key is an opaque encoded string. Hash its complete encoding
@@ -41,7 +55,9 @@ export class EncryptedChannel {
   private pushState: StreamState | undefined;
   private pullState: StreamState | undefined;
   private receiveKey: Uint8Array | undefined;
-  constructor(sessionKey: string, role: 'client' | 'server') {
+  private readonly aad: Uint8Array | null;
+  constructor(sessionKey: string, role: 'client' | 'server', binding?: ChannelBinding) {
+    this.aad = binding ? sodium.from_string(canonicalChannelBinding(binding)) : null;
     const root = material(sessionKey);
     const key = (direction: string) => sodium.crypto_generichash(32, sodium.from_string(`${PROTOCOL}/${direction}`), root);
     const sendKey = key(role === 'client' ? 'client-to-server' : 'server-to-client');
@@ -63,13 +79,13 @@ export class EncryptedChannel {
   seal(message: unknown) {
     if (this.pushState === undefined) throw new Error('Channel closed');
     const bytes = sodium.from_string(JSON.stringify(message));
-    const encrypted = sodium.crypto_secretstream_xchacha20poly1305_push(this.pushState, bytes, null, sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE);
+    const encrypted = sodium.crypto_secretstream_xchacha20poly1305_push(this.pushState, bytes, this.aad, sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE);
     sodium.memzero(bytes);
     return { type: 'encrypted' as const, data: sodium.to_base64(encrypted) };
   }
   open(frame: unknown): any {
     if (this.pullState === undefined || !frame || typeof frame !== 'object' || (frame as any).type !== 'encrypted' || typeof (frame as any).data !== 'string') throw new Error('Encrypted frame required');
-    const result = sodium.crypto_secretstream_xchacha20poly1305_pull(this.pullState, sodium.from_base64((frame as any).data), null);
+    const result = sodium.crypto_secretstream_xchacha20poly1305_pull(this.pullState, sodium.from_base64((frame as any).data), this.aad);
     if (!result || result.tag !== sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE) throw new Error('Invalid, modified or replayed frame');
     try { return JSON.parse(sodium.to_string(result.message)); }
     finally { sodium.memzero(result.message); }

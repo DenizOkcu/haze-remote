@@ -17,6 +17,8 @@ test('OPAQUE verifies PIN without sending it; encrypted streams reject tampering
   assert.ok(client);
   const server = gate.finish(challenge, client.finishLoginRequest);
   assert.equal(server.sessionKey, client.sessionKey);
+  assert.equal(gate.localPin(), null, 'Successful proof consumes the pairing secret');
+  assert.throws(() => gate.finish(challenge, client.finishLoginRequest), /unavailable/);
   assert.equal(confirmationCode(server.sessionKey), confirmationCode(client.sessionKey));
   const a = new EncryptedChannel(client.sessionKey, 'client');
   const b = new EncryptedChannel(server.sessionKey, 'server');
@@ -36,7 +38,7 @@ test('OPAQUE verifies PIN without sending it; encrypted streams reject tampering
   assert.equal(handshake(new PairingGate(), 'not-the-pin').client, undefined);
 });
 
-test('PIN expiry, fixed cross-rotation attempt budget, code B expiry and explicit local review', () => {
+test('single-use secret expiry, explicit reopen, attempt budget and local review', () => {
   let now = 0;
   const gate = new PairingGate(() => now);
   const original = gate.localPin()!.pin;
@@ -49,11 +51,12 @@ test('PIN expiry, fixed cross-rotation attempt budget, code B expiry and explici
   now = PIN_MS;
   assert.throws(() => gate.finish(challenge, client.finishLoginRequest), /expired/);
   gate.tick();
-  assert.ok(gate.localPin()!.expiresAt > now);
-  // Expired PIN cannot authenticate against the new registration record.
-  assert.equal(handshake(gate, original).client, undefined);
-  for (let i = 0; i < 3; i++) { now += PIN_MS; gate.tick(); handshake(gate, 'wrong'); }
-  now += PIN_MS; gate.tick();
+  assert.equal(gate.localPin(), null, 'Expiry never automatically renews the secret');
+  assert.throws(() => handshake(gate, original), /closed/);
+  gate.reopen();
+  assert.match(gate.localPin()!.pin, /^[a-f0-9]{64}$/);
+  assert.notEqual(gate.localPin()!.pin, original);
+  for (let i = 0; i < 5; i++) handshake(gate, 'wrong');
   assert.equal(gate.localPin(), null);
   assert.throws(() => handshake(gate, 'wrong'), /closed/);
   gate.reopen();
@@ -62,6 +65,8 @@ test('PIN expiry, fixed cross-rotation attempt budget, code B expiry and explici
   const key = gate.finish(valid.challenge, valid.client.finishLoginRequest).sessionKey;
   let approved = 0, rejected = 0;
   const pending = gate.pending(key, { peer: '192.168.1.42', browser: 'Safari', platform: 'iPad' }, () => approved++, () => rejected++);
+  assert.equal(gate.localPin(), null, 'Proved secret is consumed before enrollment approval');
+  assert.throws(() => gate.begin(challenge.loginResponse), /closed/);
   assert.throws(() => gate.approve(pending.id), /Confirm/);
   assert.throws(() => gate.confirm('wrong'));
   const review = gate.confirm(confirmationCode(key));

@@ -22,9 +22,9 @@ async function transaction<T>(mode: IDBTransactionMode, action: (store: IDBObjec
     });
   } finally { db.close(); }
 }
-export async function loadCredential(): Promise<DeviceCredential | undefined> {
-  const value = await transaction('readonly', store => store.get('current'));
+export async function loadCredential(serverId = 'current'): Promise<DeviceCredential | undefined> {
+  const value = await transaction('readonly', store => store.get(serverId));
   if (value && /^[a-f0-9]{32}$/.test(value.serverId) && /^[a-f0-9]{32}$/.test(value.deviceId) && /^[a-f0-9]{64}$/.test(value.password) && typeof value.serverPublicKey === 'string') return value;
 }
-export function saveCredential(value: DeviceCredential) { return transaction('readwrite', store => store.put(value, 'current')); }
-export function forgetCredential() { return transaction('readwrite', store => store.delete('current')); }
+export function saveCredential(value: DeviceCredential) { return transaction('readwrite', store => store.put(value, value.serverId)); }
+export function forgetCredential(serverId = 'current') { return transaction('readwrite', store => store.delete(serverId)); }

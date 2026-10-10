@@ -1,6 +1,8 @@
-import { cryptoReady, opaque, EncryptedChannel, confirmationCode, devicePassword, type DeviceCredential } from './crypto.js';
+import { cryptoReady, opaque, EncryptedChannel, confirmationCode, devicePassword, canonicalChannelBinding, type ChannelBinding, type DeviceCredential } from './crypto.js';
 
 export interface SocketTransport {
+  /** Set from actual DTLS local/remote descriptions before onopen. */
+  channelBinding?: ChannelBinding;
   readyState: number;
   bufferedAmount: number;
   send(data: string): void;
@@ -12,6 +14,7 @@ export interface SocketTransport {
 }
 export interface SessionOptions {
   serverId: string;
+  requireBinding?: boolean;
   password: string;
   credential?: DeviceCredential;
   onPending?: (code: string, expiresAt: number, remainingMs: number) => void;
@@ -25,6 +28,8 @@ export interface SessionOptions {
 // OPAQUE server API. No plaintext application-message fallback exists.
 export class ClientSession {
   private channel?: EncryptedChannel;
+  private binding?: ChannelBinding;
+  private opened = false;
   private start: ReturnType<typeof opaque.client.startLogin>;
   private password: string;
   private newPassword?: string;
@@ -37,9 +42,23 @@ export class ClientSession {
   constructor(readonly socket: SocketTransport, private readonly options: SessionOptions) {
     this.password = options.password;
     this.start = opaque.client.startLogin({ password: this.password });
-    socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', kind: options.credential ? 'resume' : 'pair', deviceId: options.credential?.deviceId, request: this.start.startLoginRequest }));
+    socket.onopen = () => {
+      try {
+        if (options.requireBinding && !socket.channelBinding) throw new Error('DTLS channel binding required');
+        if (socket.channelBinding) {
+          canonicalChannelBinding(socket.channelBinding);
+          this.binding = { ...socket.channelBinding };
+        }
+        this.opened = true;
+        socket.send(JSON.stringify({ type: 'hello', kind: options.credential ? 'resume' : 'pair', deviceId: options.credential?.deviceId, request: this.start.startLoginRequest }));
+      } catch (error) {
+        options.onError?.(error instanceof Error ? error.message : 'Invalid DTLS binding');
+        socket.close(4001, 'DTLS channel binding required');
+      }
+    };
     socket.onmessage = event => {
       try {
+        if (!this.opened) throw new Error('Transport binding not established');
         const wire = event.data.toString();
         if (wire.length > 12 * 1024 * 1024) throw new Error('Server frame too large');
         const frame = JSON.parse(wire);
@@ -49,15 +68,19 @@ export class ClientSession {
           const result = opaque.client.finishLogin({ password: this.password, clientLoginState: this.start.clientLoginState, loginResponse: frame.response });
           this.password = '';
           this.start = { clientLoginState: '', startLoginRequest: '' };
-          if (!result) throw new Error('Incorrect or expired PIN A / device credential');
+          if (!result) throw new Error('Incorrect or expired pairing secret / device credential');
           if (options.credential && result.serverStaticPublicKey !== options.credential.serverPublicKey) throw new Error('Server identity changed; pair again locally');
           this.publicKey = result.serverStaticPublicKey;
           this.code = confirmationCode(result.sessionKey);
-          this.channel = new EncryptedChannel(result.sessionKey, 'client');
+          this.channel = new EncryptedChannel(result.sessionKey, 'client', this.binding);
           socket.send(JSON.stringify({ type: 'finish', request: result.finishLoginRequest, header: this.channel.header }));
           return;
         }
-        if (frame.type === 'secure') { this.channel.acceptHeader(frame.header); return; }
+        if (frame.type === 'secure') {
+          this.channel.acceptHeader(frame.header);
+          if (options.credential) socket.send(JSON.stringify(this.channel.seal({ type: 'ready' })));
+          return;
+        }
         const message = this.channel.open(frame);
         if (message.type === 'error') { options.onError?.(message.message); return; }
         if (message.type === 'pending') {
@@ -81,7 +104,7 @@ export class ClientSession {
           return;
         }
         if (message.type === 'snapshot' && options.credential) this.authorized = true;
-        if (!this.authorized) throw new Error('Local approval required before terminal data');
+        if (!this.authorized) throw new Error('Pairing authentication required before terminal data');
         if (this.listener) this.listener(message);
         else {
           this.queuedSize += JSON.stringify(message).length;
@@ -94,7 +117,10 @@ export class ClientSession {
       }
     };
     socket.onclose = event => { this.authorized = false; this.channel?.dispose(); this.channel = undefined; this.password = ''; this.newPassword = undefined; options.onClose?.(event.code); };
-    socket.onerror = () => socket.close();
+    socket.onerror = event => {
+      options.onError?.(event instanceof Error ? event.message : 'LAN WebRTC connection failed. Check the permitted subnet, guest Wi-Fi isolation, UDP firewall rules, and local-network permissions. No relay is available.');
+      socket.close();
+    };
   }
   static async ready() { await cryptoReady; }
   subscribe(listener: (message: any) => void) {

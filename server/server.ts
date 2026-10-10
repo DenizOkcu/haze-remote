@@ -1,11 +1,11 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { isIP } from 'node:net';
-import { createServer as createHttpsServer } from 'node:https';
-import { randomUUID, X509Certificate } from 'node:crypto';
-import { readFile, stat, realpath } from 'node:fs/promises';
-import { resolve, sep, extname, basename } from 'node:path';
-import { WebSocketServer, WebSocket } from 'ws';
-import { AccessController } from './access.js';
+import { randomUUID } from 'node:crypto';
+import { stat, realpath } from 'node:fs/promises';
+import { resolve, basename } from 'node:path';
+import { AccessController, type RemoteSocket } from './access.js';
+import { startLanPeer } from './webrtc.js';
+import { selectLanInterface, type LanSelection } from './lan.js';
+import { AudioRecording } from './rtc-audio.js';
+import { UI_ORIGIN } from '../shared/signaling.js';
 import type { DeviceReview } from './pairing.js';
 import { FleetManager } from './fleet.js';
 import { isFleetRequest, type FleetProject } from '../shared/fleet.js';
@@ -14,39 +14,27 @@ import { SkillManager } from './skills.js';
 import { isManagementRequest } from '../shared/configuration.js';
 import { ConfigurationManager } from './configuration.js';
 import { SessionCatalog } from './sessions.js';
-import { SpeechService, decodeAudio, type SpeechBackend } from './speech.js';
+import { SpeechService, type SpeechBackend } from './speech.js';
 import { isSpeechRequest } from '../shared/speech.js';
 
 export interface RemoteOptions {
-  host: string; port: number; cwd: string; executable: string; args: string[]; assets: string;
+  lan: LanSelection; cwd: string; executable: string; args: string[];
+  signalingOrigin?: string;
+  /** In-process test transport injection; never exposed by the CLI. */
+  peerFactory?: typeof startLanPeer;
+  onError?: (message: string) => void;
   newArgs?: string[];
   speech?: SpeechBackend;
-  tls?: { cert: Buffer; key: Buffer };
-  hostname?: string;
+
   projects?: { name: string; cwd: string }[];
   // Tests use isolated HOME. Production inherits the Haze environment unchanged.
   env?: Record<string, string>;
   onPin?: (pin: { pin: string; expiresAt: number } | null) => void;
   onPending?: (review: DeviceReview) => void;
 }
-export function privateAddress(host: string) {
-  if (host === 'localhost' || host === '::1') return true;
-  if (isIP(host) === 4) {
-    const [a, b] = host.split('.').map(Number);
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
-  }
-  return isIP(host) === 6 && /^(fc|fd|fe[89ab])/i.test(host);
-}
 export async function startRemote(options: RemoteOptions) {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('macOS and Linux are supported.');
-  await stat(resolve(options.assets, 'index.html'));
-  if (!privateAddress(options.host)) throw new Error('Bind to a specific private/VPN or loopback address. Wildcard/public bindings are disabled.');
-  if (options.hostname !== undefined) {
-    if (options.hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(options.hostname)) throw new Error('Use an exact lowercase DNS hostname, not a URL or wildcard.');
-    if (!options.tls) throw new Error('A DNS hostname requires TLS.');
-    const certificate = new X509Certificate(options.tls.cert);
-    if (!certificate.checkHost(options.hostname, { wildcards: false }) || Date.parse(certificate.validTo) <= Date.now() || Date.parse(certificate.validFrom) > Date.now()) throw new Error('TLS certificate must be valid for the configured hostname.');
-  }
+  if (!options.peerFactory) selectLanInterface({ address: options.lan.address, subnet: options.lan.subnet, interfaceName: options.lan.interfaceName });
   const projects: FleetProject[] = [];
   for (const project of [{ cwd: options.cwd, name: basename(resolve(options.cwd)) || 'Project' }, ...(options.projects ?? [])]) {
     const cwd = await realpath(resolve(project.cwd));
@@ -56,25 +44,24 @@ export async function startRemote(options: RemoteOptions) {
   }
   if (projects.length > 16) throw new Error('At most 16 locally approved projects are supported.');
   await AccessController.ready();
-  const hosts = new Set([options.host.includes(':') ? `[${options.host}]` : options.host]);
-  if (options.host === 'localhost' || options.host.startsWith('127.') || options.host === '::1') for (const host of ['localhost', '127.0.0.1', '[::1]']) hosts.add(host);
-  if (options.hostname) hosts.add(options.hostname);
-  const protocol = options.tls ? 'https' : 'http';
-  let port = options.port, stopped = false, alive = true;
+  let stopped = false, alive = true;
+  const recording = new AudioRecording();
+  let peer: Awaited<ReturnType<typeof startLanPeer>> | undefined;
+  let resetting = false;
   let fleet: FleetManager;
   let primaryId = '', lastSelectedId = '';
-  let selection: { id: string; viewId: string; ws: WebSocket; ready: boolean } | undefined;
+  let selection: { id: string; viewId: string; ws: RemoteSocket; ready: boolean } | undefined;
   const creations = new Map<string, Promise<string>>();
   const speech = options.speech ?? new SpeechService(options.env?.HOME);
-  const speechJobs = new Map<WebSocket, { id: string; controller: AbortController }>();
+  const speechJobs = new Map<RemoteSocket, { id: string; controller: AbortController }>();
+  const recordingStarts = new Map<RemoteSocket, string>();
   let modelDownload: { controller: AbortController; done: Promise<void> } | undefined;
   let modelDownloadError: string | undefined;
   const speechStatus = async () => ({ ...await speech.status(), ...(modelDownloadError ? { error: modelDownloadError } : {}) });
   const skills = new SkillManager(projects, options.env?.HOME);
   const configuration = new ConfigurationManager(options.env?.HOME);
   const sessions = new SessionCatalog(projects, options.env?.HOME);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false });
-  const access = new AccessController({ onPin: options.onPin, onPending: options.onPending,
+  const access = new AccessController<RemoteSocket>({ requireBinding: true, onPin: options.onPin, onPending: options.onPending,
     onAuthenticated(ws) {
       alive = true;
       void show(ws, fleet.get(lastSelectedId) ? lastSelectedId : fleet.first()!.id).catch(() => { if (access.isActive(ws)) ws.close(1011, 'Snapshot unavailable'); });
@@ -84,6 +71,8 @@ export async function startRemote(options: RemoteOptions) {
       if (typeof message?.type === 'string' && message.type.startsWith('speech-')) {
         if (!isSpeechRequest(message)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Invalid speech request.' }); return; }
         if (message.type === 'speech-cancel') {
+          if (recordingStarts.get(ws) === message.targetRequestId) recordingStarts.delete(ws);
+          recording.cancel(message.targetRequestId);
           const job = speechJobs.get(ws);
           if (job?.id === message.targetRequestId) job.controller.abort();
           return;
@@ -114,15 +103,34 @@ export async function startRemote(options: RemoteOptions) {
             .catch(() => { if (access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Speech service unavailable.' }); });
           return;
         }
+        if (message.type === 'speech-record-start') {
+          if (speechJobs.has(ws)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'A speech operation is already running.' }); return; }
+          if (recordingStarts.has(ws)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'A recording is being prepared.' }); return; }
+          recordingStarts.set(ws, message.requestId);
+          void speechStatus().then(status => {
+            if (!access.isActive(ws) || recordingStarts.get(ws) !== message.requestId) return;
+            recordingStarts.delete(ws);
+            if (status.state !== 'ready') { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Download the speech model first.' }); return; }
+            try { recording.start(message.requestId); send(ws, { type: 'speech-result', requestId: message.requestId, status }); }
+            catch { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'A recording is already running.' }); }
+          }).catch(() => {
+            if (recordingStarts.get(ws) === message.requestId) recordingStarts.delete(ws);
+            if (access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId, message: 'Speech service unavailable.' });
+          });
+          return;
+        }
         if (speechJobs.has(ws)) { send(ws, { type: 'speech-error', requestId: message.requestId, message: 'A speech operation is already running.' }); return; }
         const job = { id: message.requestId, controller: new AbortController() }; speechJobs.set(ws, job);
         void (async () => {
           try {
             let text: string | undefined;
-            const audio = decodeAudio(message.audio);
-            message.audio = ''; // Drop the transport's audio reference before inference.
-            try { text = await speech.transcribe(audio, job.controller.signal); }
-            finally { audio.fill(0); }
+            const samples = recording.finish(message.requestId);
+            const audio = Buffer.alloc(samples.length * 2);
+            try {
+              for (let i = 0; i < samples.length; i++) audio.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32768))), i * 2);
+              samples.fill(0);
+              text = await speech.transcribe(audio, job.controller.signal);
+            } finally { samples.fill(0); audio.fill(0); }
             if (!job.controller.signal.aborted && access.isActive(ws)) send(ws, { type: 'speech-result', requestId: message.requestId, status: await speech.status(), ...(text !== undefined ? { text } : {}) });
           } catch (error) {
             if (!job.controller.signal.aborted && access.isActive(ws)) send(ws, { type: 'speech-error', requestId: message.requestId,
@@ -203,8 +211,8 @@ export async function startRemote(options: RemoteOptions) {
       })();
     },
   });
-  function send(ws: WebSocket | undefined, message: unknown) { access.send(ws, message); }
-  async function show(ws: WebSocket, id: string, requestId?: string) {
+  function send(ws: RemoteSocket | undefined, message: unknown) { access.send(ws, message); }
+  async function show(ws: RemoteSocket, id: string, requestId?: string) {
     if (!fleet.get(id)) throw new Error('Instance no longer exists.');
     const next = { id, viewId: randomUUID(), ws, ready: false };
     selection = next; lastSelectedId = id;
@@ -214,49 +222,6 @@ export async function startRemote(options: RemoteOptions) {
       capabilities: { fleet: 1, subagents: 'observed-v1' }, fleet: fleet.state() });
     next.ready = true;
   }
-  function validHost(req: IncomingMessage) {
-    try { const url = new URL(`${protocol}://${req.headers.host}`); return hosts.has(url.hostname) && Number(url.port || (options.tls ? 443 : 80)) === port && url.host === req.headers.host; }
-    catch { return false; }
-  }
-  function sameOrigin(req: IncomingMessage) { return validHost(req) && req.headers.origin === `${protocol}://${req.headers.host}`; }
-  function reply(res: ServerResponse, status: number, body: unknown) {
-    res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body));
-  }
-  const handler = (req: IncomingMessage, res: ServerResponse) => {
-    void handle(req, res).catch(() => { if (!res.headersSent) reply(res, 500, { error: 'Request failed' }); else res.destroy(); });
-  };
-  const server = options.tls ? createHttpsServer(options.tls, handler) : createServer(handler);
-  server.requestTimeout = 10_000; server.headersTimeout = 10_000;
-  async function handle(req: IncomingMessage, res: ServerResponse) {
-    res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
-    if (!validHost(req)) return reply(res, 403, { error: 'Unrecognized host' });
-    const url = new URL(req.url ?? '/', 'http://local');
-    if (url.pathname === '/api/info' && req.method === 'GET') return reply(res, 200, access.info());
-    if (url.pathname.startsWith('/api/')) return reply(res, 404, { error: 'Not found' });
-    if (!['GET', 'HEAD'].includes(req.method ?? '')) return reply(res, 405, { error: 'Method not allowed' });
-    let pathname: string;
-    try { pathname = decodeURIComponent(url.pathname); } catch { return reply(res, 400, { error: 'Invalid path' }); }
-    const file = resolve(options.assets, pathname === '/' ? 'index.html' : `.${pathname}`);
-    if (!file.startsWith(resolve(options.assets) + sep)) return reply(res, 404, { error: 'Not found' });
-    try {
-      const data = await readFile(file);
-      const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-      res.writeHead(200, { 'Content-Type': types[extname(file)] ?? 'application/octet-stream' }); res.end(req.method === 'HEAD' ? undefined : data);
-    } catch { reply(res, 404, { error: 'Not found' }); }
-  }
-  server.on('upgrade', (req, socket, head) => {
-    const peer = req.socket.remoteAddress ?? 'Unknown';
-    if (stopped || req.url !== '/ws' || !sameOrigin(req) || !privateAddress(peer.replace(/^::ffff:/, '')) || wss.clients.size >= 16) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
-    }
-    wss.handleUpgrade(req, socket, head, ws => {
-      ws.on('close', () => { speechJobs.get(ws)?.controller.abort(); speechJobs.delete(ws); });
-      access.attach(ws, req); ws.on('pong', () => { if (access.isActive(ws)) alive = true; });
-    });
-  });
-  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(options.port, options.host, () => { server.removeListener('error', reject); accept(); }); });
-  port = (server.address() as { port: number }).port;
   fleet = new FleetManager({ executable: options.executable, args: options.args, newArgs: options.newArgs ?? [], projects, env: options.env,
     isViewed: id => !!selection?.ready && selection.id === id && access.isActive(selection.ws),
     onEvent(message) {
@@ -267,7 +232,33 @@ export async function startRemote(options: RemoteOptions) {
   });
   let initial;
   try { initial = await fleet.create('Haze 1', projects[0].id, true, true); primaryId = lastSelectedId = initial.id; }
-  catch (error) { await fleet.close(); server.close(); wss.close(); access.dispose(); throw error; }
+  catch (error) { await fleet.close(); access.dispose(); speech.close(); throw error; }
+  try {
+    peer = await (options.peerFactory ?? startLanPeer)({ lan: options.lan, roomId: access.gate.serverId, signalingOrigin: options.signalingOrigin,
+      onError: options.onError,
+      onSocket(ws, metadata) {
+        if (stopped) { ws.close(); return; }
+        ws.on('close', () => {
+          recording.cancel(); recordingStarts.delete(ws); speechJobs.get(ws)?.controller.abort(); speechJobs.delete(ws);
+          // The native peer owns serialized disconnect recovery; Haze stays alive.
+        });
+        access.attach(ws, { ...metadata, autoApprove: true, requireBinding: true });
+        ws.on('pong', () => { if (access.isActive(ws)) alive = true; });
+      },
+      onAudio(payload) {
+        const active = access.active();
+        if (!active || !access.isActive(active) || !recording.activeId()) return;
+        const id = recording.activeId();
+        try { recording.append(payload); }
+        catch { send(active, { type: 'speech-error', requestId: id, message: 'Recording exceeded its limit. Record again.' }); }
+      },
+    });
+  } catch (error) { await fleet.close(); access.dispose(); speech.close(); throw error; }
+  async function resetPeer() {
+    if (stopped || resetting) return;
+    resetting = true;
+    try { await peer?.resetPeer(); } finally { resetting = false; }
+  }
   const lifecycle = setInterval(() => access.tick(), 250);
   const heartbeat = setInterval(() => {
     const active = access.active(); if (!active) return;
@@ -277,14 +268,14 @@ export async function startRemote(options: RemoteOptions) {
   let closing: Promise<void> | undefined;
   function close() {
     if (closing) return closing;
-    stopped = true; modelDownload?.controller.abort(); speech.close(); for (const job of speechJobs.values()) job.controller.abort(); speechJobs.clear(); clearInterval(heartbeat); clearInterval(lifecycle); access.dispose();
-    for (const ws of wss.clients) ws.terminate(); wss.close();
-    closing = (async () => {
-      const closed = new Promise<void>(resolve => server.close(() => resolve())); server.closeAllConnections();
-      await fleet.close(); await closed;
-    })();
+    stopped = true; recording.cancel(); recordingStarts.clear(); modelDownload?.controller.abort(); speech.close(); for (const job of speechJobs.values()) job.controller.abort(); speechJobs.clear(); clearInterval(heartbeat); clearInterval(lifecycle); access.dispose();
+    closing = (async () => { await peer?.close(); await fleet.close(); })();
     return closing;
   }
-  return { port, pid: initial.pid, instanceId: initial.id, close, exited: fleet.exited(initial.id),
-    local: { pin: () => access.gate.localPin(), confirm: (code: string) => access.confirm(code), approve: (id: string) => access.approve(id), reject: () => access.reject(), pair: () => access.openPairing(), revoke: () => access.revoke() } };
+  return { serverId: access.gate.serverId, pid: initial.pid, instanceId: initial.id, close, exited: fleet.exited(initial.id),
+    pairingUrl: () => { const value = access.gate.localPin(); return value ? `${UI_ORIGIN}/remote/#room=${access.gate.serverId}&secret=${value.pin}` : undefined; },
+    local: { pin: () => access.gate.localPin(),
+      pair: async () => { access.openPairing(); await resetPeer(); },
+      cancel: async () => { access.gate.close(); await resetPeer(); },
+      revoke: async () => { access.revoke(); await resetPeer(); } } };
 }

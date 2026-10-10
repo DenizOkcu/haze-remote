@@ -3,21 +3,28 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startRemote } from '../../server/server.js';
+import { peerHarness } from '../helpers.js';
+import { appFixture } from './app-fixture.js';
+test.use({ launchOptions: { args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] } });
+let app: Awaited<ReturnType<typeof appFixture>>;
+let audioTimer: ReturnType<typeof setInterval>;
 
 let remote: Awaited<ReturnType<typeof startRemote>>;
-let base = '', origin = '';
+let base = '';
 let downloads = 0, transcriptions = 0;
 let lastAudio: Buffer | undefined;
 let downloadBlocked = false, downloadComplete = false;
 let finishDownload: (() => void) | undefined;
 let lastDownloadSignal: AbortSignal | undefined;
 test.beforeEach(async ({ page }) => {
+  const transport = peerHarness();
+  // Native RTP delivery is injected here; browser track negotiation remains real.
   downloads = 0; transcriptions = 0; lastAudio = undefined;
   downloadBlocked = false; downloadComplete = false; finishDownload = undefined; lastDownloadSignal = undefined;
   base = await mkdtemp(join(tmpdir(), 'haze-speech-browser-'));
   const home = join(base, 'home'); await mkdir(home);
-  remote = await startRemote({ host: '127.0.0.1', port: 0, cwd: base, executable: process.execPath,
-    args: [resolve('tests/fixtures/agent.mjs')], assets: resolve('dist/client'), env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' },
+  remote = await startRemote({ lan: transport.lan, peerFactory: transport.peerFactory, cwd: base, executable: process.execPath,
+    args: [resolve('tests/fixtures/agent.mjs')], env: { HOME: home, PATH: process.env.PATH!, LANG: 'en_US.UTF-8' },
     speech: {
       status: async () => ({ state: downloadComplete ? 'ready' : lastDownloadSignal && !lastDownloadSignal.aborted ? 'downloading' : 'missing', downloadedBytes: downloads ? 123 : 0 }),
       download: async signal => {
@@ -31,8 +38,9 @@ test.beforeEach(async ({ page }) => {
       close() {},
     },
   });
-  origin = `http://127.0.0.1:${remote.port}`;
-  // Exercise real AudioWorklet capture/resampling without accessing a physical mic.
+  audioTimer = setInterval(() => transport.audio(Buffer.alloc(160, 255)), 20);
+  app = await appFixture(page, transport);
+  // Exercise real microphone track lifecycle without accessing a physical mic.
   await page.addInitScript(() => {
     (window as any).__micStarts = 0; (window as any).__micStops = 0; (window as any).__micReady = 0;
     // Keep the wrapper alive: WebKit can recreate a weakly held native wrapper.
@@ -58,15 +66,8 @@ test.beforeEach(async ({ page }) => {
     } });
   });
 });
-test.afterEach(async () => { await remote.close(); await rm(base, { recursive: true, force: true }); });
-async function pair(page: import('@playwright/test').Page) {
-  await page.goto(origin);
-  await page.getByLabel('PIN A', { exact: true }).fill(remote.local.pin()!.pin);
-  await page.getByRole('button', { name: 'Pair this browser' }).click();
-  await expect(page.getByLabel('Code B')).toHaveText(/^\d{8}$/);
-  remote.local.approve(remote.local.confirm((await page.getByLabel('Code B').textContent())!).id);
-  await expect(page.locator('.app-header [role="status"]')).toHaveText('Connected');
-}
+test.afterEach(async () => { clearInterval(audioTimer); await app?.close(); await remote?.close(); await rm(base, { recursive: true, force: true }); });
+async function pair(_page: import('@playwright/test').Page) { await app.pair(remote); }
 async function press(page: import('@playwright/test').Page, button: import('@playwright/test').Locator) {
   const box = (await button.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -151,8 +152,9 @@ test('insecure browser context shows actionable HTTPS guidance without starting 
     Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { configurable: true, value: undefined });
   });
-  await press(page, hold); await page.mouse.up();
-  await expect(overlay.getByRole('alert')).toContainText('--tls-cert and --tls-key');
+  await press(page, hold);
+  await expect(overlay.getByRole('alert')).toContainText('trusted HTTPS');
+  await page.mouse.up();
   expect(await page.evaluate(() => (window as any).__micStarts)).toBe(0);
   expect(transcriptions).toBe(0);
 });
@@ -172,13 +174,15 @@ test('blocked microphone shows secure-access guidance during download and restor
   const help = overlay.getByRole('region', { name: 'Microphone setup' });
   await expect(help.getByLabel('Browser', { exact: true })).toHaveCount(0);
   await expect(help.getByLabel('Settings URL', { exact: true })).toHaveCount(0);
-  await expect(help).toContainText('trusted HTTPS');
+  await expect(help).toContainText('hosted HTTPS');
   await overlay.getByRole('button', { name: 'Download Parakeet' }).click();
   await expect(overlay.getByRole('progressbar')).toBeVisible();
   await expect(help).toBeVisible();
   await expect(help.getByLabel('Current origin', { exact: true })).toHaveCount(0);
-  await expect(help).toContainText('localhost');
+  await expect(help).toContainText('https://haze.build/remote/');
   await expect(help).not.toContainText('insecure-origin exception');
+  // Progress renders optimistically; wait for host receipt before navigating.
+  await expect.poll(() => downloads).toBe(1);
   await page.reload();
   await expect(page.locator('.app-header [role="status"]')).toHaveText('Connected');
   expect(lastDownloadSignal?.aborted).toBe(false);
@@ -200,7 +204,9 @@ test('permission denial shows microphone help repeatedly without recommending in
   const overlay = page.getByRole('dialog');
   await overlay.getByRole('button', { name: 'Download Parakeet' }).click();
   await page.evaluate(() => { (window as any).__micDeny = true; });
-  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true })); await page.mouse.up();
+  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true }));
+  await expect(overlay.getByRole('alert')).toBeVisible();
+  await page.mouse.up();
   await expect(overlay.getByRole('alert')).toContainText('Microphone access failed');
   const help = overlay.getByRole('region', { name: 'Microphone setup' });
   await expect(help).toBeVisible();
@@ -223,52 +229,6 @@ test('explicit Cancel download stops a host download and returns to consent', as
   expect(lastDownloadSignal?.aborted).toBe(true);
 });
 
-test('HTTP microphone exception records without AudioWorklet and clears audio after transcription', async ({ page }) => {
-  await pair(page);
-  await page.getByRole('button', { name: 'Push to talk' }).click();
-  const overlay = page.getByRole('dialog');
-  await overlay.getByRole('button', { name: 'Download Parakeet' }).click();
-  const hold = overlay.getByRole('button', { name: 'Hold to record', exact: true });
-  await expect(hold).toBeVisible();
-  await page.evaluate(() => {
-    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
-    Object.defineProperty(AudioContext.prototype, 'audioWorklet', { configurable: true, get: () => undefined });
-    (window as any).__fallbackCaptures = 0;
-    const original = AudioContext.prototype.createScriptProcessor;
-    AudioContext.prototype.createScriptProcessor = function(...args) {
-      (window as any).__fallbackCaptures++; return original.apply(this, args);
-    };
-  });
-  await press(page, hold);
-  await expect(overlay.getByRole('button', { name: /Release to transcribe/ })).toBeVisible();
-  await page.waitForTimeout(350); await page.mouse.up();
-  await expect(overlay.getByLabel('Review and edit your message')).toHaveValue('Transcribed request');
-  expect(transcriptions).toBe(1);
-  expect(await page.evaluate(() => (window as any).__fallbackCaptures)).toBeGreaterThan(0);
-  expect(lastAudio?.length).toBeGreaterThan(0);
-  expect(lastAudio?.every(byte => byte === 0)).toBe(true);
-  expect(await page.evaluate(() => (window as any).__micStops)).toBeGreaterThan(0);
-  await expect(overlay.getByRole('region', { name: 'Microphone setup' })).toHaveCount(0);
-});
-
-test('HTTP microphone fallback cancellation stops capture without submitting audio', async ({ page }) => {
-  await pair(page);
-  await page.getByRole('button', { name: 'Push to talk' }).click();
-  const overlay = page.getByRole('dialog');
-  await overlay.getByRole('button', { name: 'Download Parakeet' }).click();
-  await expect(overlay.getByRole('button', { name: 'Hold to record', exact: true })).toBeVisible();
-  await page.evaluate(() => {
-    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
-    Object.defineProperty(AudioContext.prototype, 'audioWorklet', { configurable: true, get: () => undefined });
-  });
-  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true }));
-  await expect(overlay.getByRole('button', { name: /Release to transcribe/ })).toBeVisible();
-  await page.keyboard.press('Escape'); await page.mouse.up();
-  await expect(overlay).not.toBeVisible();
-  expect(transcriptions).toBe(0);
-  expect(await page.evaluate(() => (window as any).__micStops)).toBeGreaterThan(0);
-});
-
 test('Firefox HTTP denial recommends secure access without insecure-media preferences', async ({ page }) => {
   await pair(page);
   await page.getByRole('button', { name: 'Push to talk' }).click();
@@ -280,32 +240,32 @@ test('Firefox HTTP denial recommends secure access without insecure-media prefer
     Object.defineProperty(navigator, 'userAgent', { configurable: true, value: 'Mozilla/5.0 Firefox/140.0' });
     (window as any).__micDeny = true;
   });
-  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true })); await page.mouse.up();
+  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true }));
+  await expect(overlay.getByRole('alert')).toBeVisible();
+  await page.mouse.up();
   const help = overlay.getByRole('region', { name: 'Microphone setup' });
   await expect(help.getByLabel('Settings URL', { exact: true })).toHaveCount(0);
-  await expect(help).toContainText('trusted HTTPS');
+  await expect(help).toContainText('hosted HTTPS');
   await expect(help).not.toContainText('about:config');
   await expect(help).not.toContainText('insecure.enabled');
   expect(transcriptions).toBe(0);
 });
 
-test('audio startup denial reports the audio stage and cleans up a microphone granted concurrently', async ({ page }) => {
+test('microphone track attachment failure cleans up the granted microphone', async ({ page }) => {
   await pair(page);
   await page.getByRole('button', { name: 'Push to talk' }).click();
   const overlay = page.getByRole('dialog');
   await overlay.getByRole('button', { name: 'Download Parakeet' }).click();
-  await expect(overlay.getByRole('button', { name: 'Hold to record', exact: true })).toBeVisible();
   await page.evaluate(() => {
-    const original = AudioContext.prototype.resume;
-    let calls = 0;
-    AudioContext.prototype.resume = function() {
-      if (++calls === 1) return Promise.reject(new DOMException('The request is not allowed in the current context', 'NotAllowedError'));
-      return original.call(this);
+    const original = RTCRtpSender.prototype.replaceTrack;
+    RTCRtpSender.prototype.replaceTrack = function(track) {
+      if (track) return Promise.reject(new DOMException('Track attachment denied', 'NotAllowedError'));
+      return original.call(this, track);
     };
   });
-  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true })); await page.mouse.up();
-  await expect(overlay.getByRole('alert')).toContainText('Audio engine startup failed');
-  await expect(overlay.getByRole('alert')).not.toContainText('Microphone access failed');
+  await press(page, overlay.getByRole('button', { name: 'Hold to record', exact: true }));
+  await expect(overlay.getByRole('alert')).toContainText('Microphone access failed');
+  await page.mouse.up();
   await expect.poll(() => page.evaluate(() => (window as any).__micStops)).toBeGreaterThan(0);
   expect(transcriptions).toBe(0);
 });
