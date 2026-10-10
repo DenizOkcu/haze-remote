@@ -13,6 +13,8 @@ import type { ManagementCommand, ManagementResponse, SessionInfo } from '../shar
 import { SkillsTab, type SkillCommand } from './SkillsTab';
 import { ConfigurationTabs } from './ConfigurationTabs';
 import { SessionsSidebar, SidebarTabs, type SidebarTab } from './SessionsSidebar';
+import { SpeechInput } from './SpeechInput';
+import { SpeechRpc } from './speech-rpc';
 
 type Status = 'Connecting' | 'Connected' | 'Reconnecting' | 'Already connected' | 'Exited' | 'Switching' | 'Stopping';
 type FleetCommand = FleetRequest extends infer R ? R extends FleetRequest ? Omit<R, 'requestId'> : never : never;
@@ -67,6 +69,7 @@ export function App() {
   const credential = useRef<DeviceCredential | undefined>(undefined);
   const serverId = useRef('');
   const session = useRef<ClientSession | undefined>(undefined);
+  const [speechRpc] = useState(() => new SpeechRpc(message => session.current?.send(message) ?? false));
   const closed = useRef<((code: number) => void) | undefined>(undefined);
   const input = useRef<(data: string) => InputResult>(() => 'not-sent');
   const requestManagement = useCallback((command: ManagementCommand) => new Promise<ManagementResponse>((resolve, reject) => {
@@ -98,6 +101,7 @@ export function App() {
     }
   }), []);
   function disconnectSkills() {
+    speechRpc.disconnect();
     for (const pending of skillPending.current.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Connection lost. Reopen the skill to check whether a save completed; your draft is preserved.'));
@@ -139,7 +143,7 @@ export function App() {
   }, [paired]);
 
   function openSession(password: string, remembered?: DeviceCredential) {
-    const connection = new ClientSession(new WebSocket(`ws://${location.host}/ws`), {
+    const connection = new ClientSession(new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`), {
       serverId: serverId.current, password, credential: remembered,
       onPending(code, _expiresAt, remainingMs) {
         setPending({ code, stage: 'confirm', expiresAt: Date.now() + Math.max(0, Math.min(CONFIRM_MS, remainingMs)) });
@@ -260,6 +264,7 @@ export function App() {
       unsubscribe = connection.subscribe(message => {
         if (disposed || session.current !== connection) return;
         lastContact.current = Date.now();
+        if (message.type === 'speech-result' || message.type === 'speech-error') { speechRpc.receive(message); return; }
         if (message.type === 'skills-result' || message.type === 'skills-error') {
           const pending = skillPending.current.get(message.requestId);
           if (pending) {
@@ -433,7 +438,7 @@ export function App() {
     {busy && <button onClick={() => session.current?.close()}>Cancel pairing</button>}
     {error && <p role="alert" className="error">{error}</p>}
     <details className="readiness"><summary>Before pairing</summary><ul><li>Keep the computer awake and haze-remote running.</li><li>Use the printed address on a trusted private network.</li><li>Have the computer’s local terminal available for code B and approve.</li></ul></details>
-    <p className="fine-print">Terminal transport is encrypted. The HTTP-delivered page can still be modified by an active network attacker. Pair only on trusted networks. Approval grants your computer’s permissions.</p>
+    <p className="fine-print">Terminal transport is encrypted. {location.protocol === 'https:' ? 'HTTPS protects page delivery when the browser trusts the server certificate.' : 'The HTTP-delivered page can still be modified by an active network attacker.'} Pair only on trusted networks. Approval grants your computer’s permissions.</p>
   </section></main>;
   return <main className="workspace">
     <header className="app-header">
@@ -505,6 +510,11 @@ export function App() {
     <div className="terminal-toolbar">
       <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="terminal-title">{activeInstance?.name ?? 'Loading fleet…'}<small> · {fleet?.instances.filter(instance => instance.state === 'running').length ?? 0} running</small></span>
+      <SpeechInput rpc={speechRpc} target={{ id: activeId, name: activeInstance?.name ?? 'Haze' }} enabled={connected && !operation && view === 'terminal' && activeInstance?.state === 'running'} send={(id, text) => {
+        if (id !== display.current.id || !text.trim() || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) return 'not-sent';
+        if (new TextEncoder().encode(text).byteLength > 8000) return 'too-large';
+        return input.current(`\x1b[200~${text}\x1b[201~\r`);
+      }} />
       <div className="toolbar-group" aria-label="Terminal readability"><button disabled={fontSize <= 12} onClick={() => setFontSize(size => Math.max(12, size - 2))} aria-label="Smaller terminal text">A−</button><span className="font-size">{fontSize}px</span><button disabled={fontSize >= 24} onClick={() => setFontSize(size => Math.min(24, size + 2))} aria-label="Larger terminal text">A+</button><button onClick={() => terminal.current?.scrollToBottom()}>Latest output</button></div>
       {activeInstance?.state === 'exited' ? <button disabled={!canOperate || !!operation || (fleet?.instances.length ?? 0) < 2} onClick={() => command({ type: 'instance-close', instanceId: activeId })}>Close tab</button> : <button className="danger" disabled={!canOperate || !!operation || activeInstance?.state !== 'running'} onClick={() => { if (window.confirm(`Stop ${activeInstance?.name}? Its Haze process will terminate. Other instances keep running. Recent output remains until you close this tab.`)) command({ type: 'instance-stop', instanceId: activeId }); }}>Stop instance</button>}
     </div>

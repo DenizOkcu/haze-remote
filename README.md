@@ -83,6 +83,38 @@ The computer must stay awake and haze-remote must remain running. To keep the ho
 - **Readability:** A−/A+ changes terminal text from 12–24px; only this non-sensitive preference is stored locally. **Latest output** scrolls to the bottom, and the layout follows the browser's visible viewport.
 - **Honest input:** typed text and pastes are delivered straight to the selected Haze terminal. Local enqueue is not confirmation the agent processed it; failed or uncertain sends are never retried automatically.
 
+### Push-to-talk voice input
+
+Press **Hold to talk** in the selected terminal's toolbar. On first use, haze-remote asks before downloading **Parakeet TDT 0.6B v3 INT8** (approximately **670 MB** of pinned, SHA-256-verified ONNX model assets from Hugging Face). Only model assets are cached under `~/.haze/remote/speech/parakeet-v3-int8`; there is no startup or automatic model download. Download needs internet access; transcription runs locally on the haze-remote host using the bundled CPU-capable sherpa-onnx runtime, without a cloud speech provider or NVIDIA GPU requirement. Language coverage is checkpoint-specific, not universal.
+
+Hold the button with touch/mouse, or hold Space/Enter while it is focused, speak, then release. Recordings are limited to **30 seconds**. The resulting text appears in an editable overlay bound to the original Haze instance. **Send to Haze** pastes the reviewed text and presses Enter through the normal terminal input path. Ensure Haze is at the intended prompt. Releasing, silence, and transcription never submit a request. Record more appends to the draft; Cancel discards it. Disconnects discard recordings but preserve an already transcribed text draft while the page remains open. Failed/uncertain sends are never automatically retried.
+
+**Recordings are memory-only**: no audio files, browser storage, session entries, or recording logs are created. Audio buffers are released after transcription (before Send), and the isolated inference subprocess exits to release its native audio buffers. Only approved text reaches Haze, where normal session persistence applies. This is not a guarantee against OS swap, crash dumps, or recovery of immutable JavaScript strings.
+
+When microphone access is blocked, the voice overlay always shows **Microphone setup**, including alongside model download progress. On HTTP pages, it recommends trusted HTTPS or localhost on the computer running haze-remote. Permission denials on secure pages show site/OS microphone-permission guidance.
+
+An explicitly approved model download belongs to the host: closing/restarting the browser, reconnecting, or closing the voice overlay does not cancel it. Reopen voice input to see current progress; it does not start a second download. **Cancel download** or stopping haze-remote cancels the download. Recordings/transcription still cancel on disconnect.
+
+Recording checks the microphone API the browser actually exposes, rather than rejecting every HTTP page by `isSecureContext`. Where a browser explicitly permits HTTP microphone capture but hides AudioWorklet, a memory-only Web Audio ScriptProcessor fallback is used. Press and **hold** the PTT button until recording starts; a quick click does not start hands-free recording.
+
+Browser microphones normally require a **secure context**. Plain HTTP LAN/private-IP access supports terminal control, but is not a secure context for microphone access. Use loopback on the host, or enable HTTPS with a certificate trusted by the remote device and valid for the printed address:
+
+```sh
+haze-remote --host 192.168.1.20 --tls-cert /path/to/certificate.pem --tls-key /path/to/private-key.pem
+```
+
+For quick local HTTPS without managing certificate files yourself:
+
+```sh
+haze-remote --lan --https
+# Or choose a specific address:
+haze-remote --host 192.168.1.20 --https
+```
+
+`--https` generates a self-signed server certificate using **OpenSSL** on first use, then reuses it across restarts. Certificates and private keys are stored per bind address under `~/.haze/remote/tls` with restricted directory/key permissions. Changing the port keeps the same certificate; changing the address creates a separate one. Certificates last one year. Expired or damaged certificates cause an actionable error rather than silently replacing the saved identity. Do not combine `--https` with `--tls-cert`/`--tls-key`.
+
+The terminal prints the HTTPS address and SHA-256 certificate fingerprint. Your browser will warn that the self-signed certificate is not trusted. On your trusted private network, verify the server/address and compare its certificate fingerprint before accepting an exception, if the browser supports one. Exceptions may not persist even though the certificate does. **Accepting a warning does not reliably enable microphone access**; use a trusted certificate with `--tls-cert`/`--tls-key` if recording remains blocked. haze-remote does not install trust roots or change browser security settings. HTTPS does not relax private-address bindings, matching Host/Origin checks, or local pairing approval.
+
 ### Fleet of Haze instances
 
 - **Tabs are real Haze processes**, not browser tabs or copies of one terminal. **New instance** lets you name an instance and choose a locally approved project. Each has its own PID and terminal screen/history. Left/Right/Home/End navigate instance tabs with a physical keyboard.
@@ -161,7 +193,7 @@ Those are Haze's existing session features; avoid print-mode arguments for inter
 
 OPAQUE authenticates the pairing PIN or a 256-bit remembered device secret and establishes fresh keys on every connection. Libsodium XChaCha20-Poly1305 secretstream encrypts/authenticates ordered messages in independently keyed directions. It covers terminal input, resize, snapshots, output, enrollment, revocation requests, application heartbeats, and fleet lifecycle/subagent metadata messages. There is no plaintext terminal or cookie-authentication fallback.
 
-Browser cryptography uses bundled WASM/JavaScript implementations, not `crypto.subtle`, which is unavailable on ordinary LAN HTTP. Browser `crypto.getRandomValues` supplies secure randomness. All assets are bundled locally; there are no accounts, cloud telemetry, cloud services, databases, Docker, or certificate setup requirements.
+Browser cryptography uses bundled WASM/JavaScript implementations, not `crypto.subtle`, which is unavailable on ordinary LAN HTTP. Browser `crypto.getRandomValues` supplies secure randomness. Application assets are bundled locally; there are no accounts, cloud telemetry, cloud transcription services, databases, or Docker requirements. Optional voice input downloads model assets after consent and requires a secure browser context; remote-device microphone access needs a trusted HTTPS certificate.
 
 The server keeps only one OPAQUE device registration record in RAM, not its raw secret. Restarting invalidates the pairing. Browser credentials are scoped to the origin/server instance and accessible to code running under that origin—an HTTP-delivery attacker remains a threat. Active sessions expire after 30 minutes and reconnect with a new handshake automatically. Credential authority lasts until revocation or server shutdown.
 

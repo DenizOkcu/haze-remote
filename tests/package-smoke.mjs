@@ -16,7 +16,7 @@ const wait = async check => {
 try {
   const result = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', dir], { encoding: 'utf8' }));
   const packed = Array.isArray(result) ? result[0] : result['@denizokcu/haze-remote'];
-  for (const path of ['dist/client/index.html', 'dist/server/cli.js', 'dist/server/fleet.js', 'dist/server/haze-observer/preload.js', 'dist/server/haze-observer/loader.js', 'dist/server/haze-observer/runtime.js', 'dist/server/haze-observer/transform.js', 'dist/server/haze-observer/host.js', 'dist/shared/fleet.js', 'dist/shared/observer.js', 'dist/shared/session.js', 'scripts/prepare-pty.mjs']) assert.ok(packed.files.some(f => f.path === path));
+  for (const path of ['dist/client/index.html', 'dist/server/cli.js', 'dist/server/fleet.js', 'dist/server/haze-observer/preload.js', 'dist/server/haze-observer/loader.js', 'dist/server/haze-observer/runtime.js', 'dist/server/haze-observer/transform.js', 'dist/server/haze-observer/host.js', 'dist/shared/fleet.js', 'dist/shared/observer.js', 'dist/shared/session.js', 'dist/shared/speech.js', 'dist/server/speech.js', 'dist/server/speech-worker.js', 'dist/server/speech-model.js', 'scripts/prepare-pty.mjs']) assert.ok(packed.files.some(f => f.path === path));
   assert.ok(!packed.files.some(f => /^(client|server|shared|tests|\.haze)\//.test(f.path)));
   assert.ok(!packed.files.some(f => f.path === 'dist/server/git-review.js' || f.path === 'dist/shared/review.js' || f.path === 'dist/server/subagents.js'), 'Removed review/session-reader code must not survive in build artifacts');
   await writeFile(join(dir, 'package.json'), JSON.stringify({ private: true, allowScripts: { 'node-pty@1.1.0': true, '@denizokcu/haze-remote@0.0.1': true } }));
