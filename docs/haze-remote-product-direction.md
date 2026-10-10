@@ -1,6 +1,6 @@
 # Make haze-remote the Orca of Haze
 
-Historical product proposal · **2026-10-07**. The user subsequently prioritized a fleet of Haze instances with tabs and a subagent sidebar, and asked to remove Git review. That fleet is now implemented; see [roadmap implementation status](haze-remote-roadmap.md#implementation-status), [current fleet usage](../README.md#fleet-of-haze-instances), and [subagent evidence](fleet-and-subagents.md). The inventory and review-first sequencing below describe the earlier baseline/proposal, not the current UI. Secure off-network deployment remains future work.
+Product proposal · **2026-10-07**. The user subsequently prioritized a fleet of Haze instances with tabs and a subagent sidebar, and asked to remove Git review. That fleet is now implemented; see [roadmap implementation status](haze-remote-roadmap.md#implementation-status), [current fleet usage](../README.md#fleet-of-haze-instances), and [subagent evidence](fleet-and-subagents.md). The review-first sequencing below is a proposal, not the current UI. The current hosted HTTPS UI and authenticated direct IPv4 LAN transport do not provide off-network access.
 
 Execution order: [prioritized roadmap](haze-remote-roadmap.md).
 
@@ -10,7 +10,7 @@ Execution order: [prioritized roadmap](haze-remote-roadmap.md).
 
 The target is not “Orca but smaller.” It is **the best remote control plane for Haze**: Haze owns reasoning, models, tools, permissions, configuration, and durable conversations; haze-remote owns access, live control, attention, navigation, and eventually lightweight review.
 
-“Wherever” is the future promise, **not today's deployment guarantee**. Today the app is restricted to trusted private networks, requires a running awake host, and serves its frontend over HTTP. Do not market it as internet-ready until authenticated frontend delivery and a supported remote route are implemented and reviewed.
+“Wherever” is the future promise, **not today's deployment guarantee**. Today the app uses the hosted HTTPS UI, requires internet for UI/signaling and an awake host on the exact permitted IPv4 LAN subnet. VPN, IPv6, and off-network routing are unsupported. The protocol trusts hosted JavaScript; it does not protect against a compromised frontend.
 
 ### Primary jobs to be done
 
@@ -23,22 +23,11 @@ Serve job 1 immediately. Jobs 2–4 require actual new capabilities, not just a 
 
 ## What exists today
 
-The inspected repository is a **single locally approved browser controlling a single server-owned Haze PTY**. It has no agent fleet or structured task API.
+One paired browser controls a bounded host-owned fleet of real Haze PTYs. Terminal control, Providers/Settings, Sessions, Skills, and automatic subagent observation are described in [current usage](../README.md). Haze itself remains authoritative for tools and model execution.
 
-| Capability | Current evidence | Consequence |
-| --- | --- | --- |
-| Real Haze execution | `startRemote` in [server/server.ts](../server/server.ts), lines 150–153, spawns installed Haze in a PTY with cwd/environment. | Keep Haze unchanged; avoid rebuilding an agent backend. |
-| Local approval and encrypted transport | [README](../README.md), pairing/security sections; [server/access.ts](../server/access.ts). | One browser credential/controller; remote approval is deliberately unavailable. |
-| Touch and keyboard control | `App` in [client/App.tsx](../client/App.tsx), lines 199–241: terminal, keys, multiline Paste, separate Enter. | A runnable steering surface already exists; improve it incrementally. |
-| Reconnect | `App`, lines 95–188: retries, heartbeat, visibility/online recovery, snapshot-gated input. | A closed browser does not kill Haze; preserve this behavior. |
-| Screen recovery | `startRemote`, lines 52–73 and 160–175: headless terminal, snapshot, exit state. | Recent screen plus 2,000 lines, not durable session history. |
-| Haze resume | [README](../README.md), Haze argument forwarding; [compatibility evidence](haze-compatibility.md), lines 9–19. | `--continue`/`--resume` belong to Haze; currently supplied at launch, not selected in a remote session browser. |
-| Honest connection/process state | `App`, lines 130–141 and 229–234. | Connected/Exited are known. Working/Waiting/Completed task states are not known. |
-| Private-network boundary | [security model](security.md); `startRemote`, lines 84–92 and 132–142. | HTTP assets remain vulnerable to active replacement; encrypted terminal traffic is not secure page delivery. |
+Reconnect restores the same PID and bounded terminal screen; it does not replay input. Process lifetime/output activity are known, but semantic Working/Waiting/Completed states are not inferred. Managed worktrees, structured per-tool approval cards, Git review, cloud relay, multi-host aggregation, and persistence across server restart are not implemented.
 
-**Absent in the current UI/server:** session/workspace inventory, managed worktrees, task queue, structured Haze events, per-tool approval cards, changed-file/diff review, completion notifications, cloud relay, multi-host aggregation, and daemon persistence across server restart.
-
-The existing tests and compatibility document record historical verification, not checks rerun during this research. Physical-tablet and Linux coverage remain documented gaps.
+The deployment contract is [hosted HTTPS UI plus direct LAN WebRTC](security.md): exact OS IPv4/subnet selection, OPAQUE/secretstream DTLS-fingerprint binding, one remembered credential, and no STUN/TURN/relay. Existing compatibility evidence is not production hosted-service validation; physical-tablet and Linux checks remain gaps.
 
 ## UX direction: a cockpit, not a miniature IDE
 
@@ -98,7 +87,7 @@ The current composer clears immediately after `terminal.paste`, while terminal i
 
 [shared/session.ts](../shared/session.ts) and `startRemote`'s authenticated `onMessage` handler are the integration seam. Introduce typed, runtime-validated message variants as extensions require them; TypeScript types alone do not validate a peer.
 
-All session/task metadata, diffs, and requests stay on the authenticated encrypted channel. `/api/info` stays limited to its existing pairing/discovery purpose. Do not serve working-directory files through the static asset server.
+All session/task metadata and requests stay on the authenticated encrypted channel. Do not introduce public metadata endpoints or serve working-directory files.
 
 ### 3. Haze event adapter, only after contract discovery
 
@@ -129,9 +118,7 @@ Use rendered text, not arbitrary HTML. Avoid network fetches just to compute a d
 
 ## Remote access is a parallel trust track
 
-For away-from-home use, authentic frontend delivery is a gate, not optional polish. The current browser uses `ws://` and server checks assume `http://`; a reverse proxy alone is not a drop-in supported solution.
-
-Define and test one HTTPS/WSS private-network/VPN deployment, trusted origin/host behavior, proxy peer-address handling if applicable, and certificate onboarding. Retain local approval, private binding policy, revocation, and no public port-forwarding guidance. Obtain focused review of these changes before broad remote positioning. Native phone apps and relays come much later, if direct access proves insufficient.
+The current hosted HTTPS frontend and outbound authenticated REST signaling do not create a route from another network. Keep the exact permitted LAN path and fail-closed transport checks. Off-network access, VPN, IPv6, and relays are unsupported; no port-forwarding or certificate onboarding recipe is offered. Obtain focused security review before changing reachability, origins, credentials, or persistence. Trust in the hosted JavaScript remains an explicit boundary.
 
 ## Success measures
 

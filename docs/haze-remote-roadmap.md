@@ -1,14 +1,14 @@
 # haze-remote: value-first roadmap
 
-Original proposal · **2026-10-07**. The prioritization below is historical: the user subsequently chose fleet navigation over Git review.
+Product proposal · **2026-10-07**. The prioritization below is historical: the user subsequently chose fleet navigation over Git review.
 
 ## Implementation status
 
-Implemented: retained terminal reliability/ergonomics, a real multi-PTY fleet with instance tabs and per-instance drafts, safe independent lifecycle, background output markers, and an explicitly linked real subagent lifecycle sidebar. **Git review (rank 7) was removed at the user's request.** The fleet is bounded and host-owned; there is no autonomous scheduler or implicit resume of launch arguments.
+Implemented: retained terminal reliability/ergonomics, a real multi-PTY fleet with instance tabs and per-instance drafts, safe independent lifecycle, background output markers, and an automatic in-process subagent lifecycle sidebar. **Git review (rank 7) was removed at the user's request.** The fleet is bounded and host-owned; there is no autonomous scheduler or implicit resume of launch arguments.
 
-Implementation lives in `client/App.tsx`, `client/SubagentSidebar.tsx`, `server/fleet.ts`, `server/subagents.ts`, `server/server.ts`, and `shared/fleet.ts`. See [current fleet usage](../README.md#fleet-of-haze-instances) and [subagent evidence/limitations](fleet-and-subagents.md).
+Implementation lives in `client/App.tsx`, `client/SubagentSidebar.tsx`, `server/fleet.ts`, `server/server.ts`, and `shared/fleet.ts`. See [current fleet usage](../README.md#fleet-of-haze-instances) and [subagent evidence/limitations](fleet-and-subagents.md).
 
-Automatic worktree management, session/PTY auto-association, worker terminals/control, multi-host routing, HTTPS/off-network deployment, Linux/device validation, and durable fleet ownership remain future work. The milestones below preserve the original proposal, not the current delivery order or complete Orca parity.
+Automatic worktree management, worker terminals/control, multi-host routing, off-network deployment, Linux/device validation, and durable fleet ownership remain future work. The current UI is hosted over HTTPS, but transport requires the exact permitted IPv4 LAN path with no VPN/IPv6/relay support. The milestones below preserve the original proposal, not the current delivery order or complete Orca parity.
 
 Context: [product/UX/architecture direction](haze-remote-product-direction.md).
 
@@ -34,7 +34,7 @@ Ranges are estimates, not delivery commitments. A changed protocol/storage/secur
 | 3 | **Touch readability.** Font-size control, expandable composer, scroll-to-bottom, retained non-sensitive preferences. | High: makes the existing control surface useful for longer sessions. | S | Existing xterm/FitAddon; test rotation, narrow layouts, and virtual-keyboard geometry. |
 | 4 | **Editable quick instructions.** A handful of plain-language steering templates that fill a draft; verified `/help` shortcut. | High: less typing during short remote check-ins. | XS–S | Depends on rank 1. No auto-Enter, hidden queue, unsupported slash commands, or shell macros. |
 | 5 | **Safer Unpair and clearer onboarding.** Explain loss of remote access and host-side recovery; provide readiness checklist. | Medium: prevents accidental lockout and setup confusion. | XS | Browser Unpair currently invokes revocation immediately; local approval/revocation remains unchanged. |
-| 6 | **Find/copy recent output.** Search the bounded terminal history; explicit copy/selection fallback. | Medium–high: easier inspection without scrolling thousands of lines. | S–M | May require xterm search addon. HTTP clipboard restrictions matter. Label as recent history, not complete transcript. |
+| 6 | **Find/copy recent output.** Search the bounded terminal history; explicit copy/selection fallback. | Medium–high: easier inspection without scrolling thousands of lines. | S–M | May require xterm search addon. Browser clipboard permissions matter. Label as recent history, not complete transcript. |
 | 7 | **Lightweight read-only Changes panel → feedback draft.** Bounded file list/diff and editable contextual feedback. | High: adds a real review/steer loop rather than terminal polish. | M | New authenticated message variants and Git boundary; baseline/untracked/secret handling must be designed. |
 | 8 | **Truthful activity/unread markers.** Last output time and per-view unread activity; no fake completion detection. | Medium alone; high once sessions multiply. | S–M | Terminal output is activity, not agent intent; avoid noisy alerts from terminal redraws. |
 | 9 | **Structured attention from Haze.** Working/needs-input/turn-complete state, capability fallback, in-app attention. | Very high: tells users when to intervene. | L/unknown until contract discovery | A stable interactive Haze event/hook contract is not established by this repository. Run a short feasibility spike before committing. |
@@ -44,7 +44,7 @@ Ranges are estimates, not delivery commitments. A changed protocol/storage/secur
 
 ### Parallel release gates, not optional backlog items
 
-1. **Safe away-from-home deployment:** high value, M–L/unconfirmed effort. Define one HTTPS/WSS private/VPN route with authenticated frontend delivery and reviewed host/origin/peer handling. The current `ws://` client and HTTP-only checks require code changes; a proxy recipe alone is insufficient. Do not suggest internet port forwarding. This gates broader remote marketing, not trusted-LAN ergonomic improvements.
+1. **Preserve deployment boundaries:** hosted HTTPS frontend and outbound authenticated REST signaling are current requirements, not an off-network route. Direct WebRTC is restricted to the exact OS IPv4 LAN subnet; there is no STUN/TURN/relay or VPN/IPv6 support. Do not suggest port forwarding. Trust in hosted JavaScript is not compromised-frontend protection. Broader routing would require a new reviewed threat model.
 2. **Deployment confidence:** add Linux/native coverage and physical-tablet sleep/wake, keyboard, rotation, Wi-Fi-loss tests before expanding supported environments. Engineering effort is modest for focused CI, but real-device access is required. Existing docs explicitly name these gaps.
 3. **Preserve the trust model:** local-only approval, pre-approval metadata isolation, immediate revocation, no automatic second-tab takeover, bounded messages/output, no offline input replay, no new plaintext metadata endpoints. New storage/origin/crypto behavior requires focused review.
 
@@ -88,7 +88,7 @@ Smallest Changes panel:
 3. Show a bounded read-only unified diff; indicate truncation, binary files, rename handling, and untracked files without automatically reading their contents. Enforce credential-file exclusions on any preview.
 4. Let the user prepare feedback with path/hunk context in an editable composer draft, then explicitly Paste/Enter.
 
-Implementation anchors: authenticated `onMessage` in [server/server.ts](../server/server.ts), [shared/session.ts](../shared/session.ts), a focused Git helper, and a Changes view alongside the existing terminal. Never expose repository files through static HTTP routing.
+Implementation anchors: authenticated `onMessage` in [server/server.ts](../server/server.ts), [shared/session.ts](../shared/session.ts), a focused Git helper, and a Changes view alongside the existing terminal. Never expose repository files through a public file service.
 
 Acceptance criteria:
 
@@ -139,7 +139,7 @@ npm run test:browser -- --reporter=dot
 
 Use targeted browser cases while developing, then the relevant full suite. Playwright browser binaries must be installed. Installed-Haze coverage requires the existing optional smoke setup; follow [README verification](../README.md#verification) and [compatibility evidence](haze-compatibility.md), use an isolated HOME, and avoid user configuration/credentials. Package smoke is appropriate for deployment/CLI changes, not necessary for a Markdown-only proposal.
 
-For UI implementation, exercise actual interactions in Chromium/WebKit, not just snapshots. Supplement with physical-device checks for virtual keyboard, selection/copy, background suspension, and wake recovery. HTTPS/origin changes additionally need adversarial host/origin/revocation checks. This planning task did not execute these runtime suites.
+For UI implementation, exercise actual interactions in Chromium/WebKit, not just snapshots. Supplement with physical-device checks for virtual keyboard, selection/copy, background suspension, and wake recovery. Transport/origin changes additionally need adversarial path/channel-binding/revocation checks. This planning task did not execute these runtime suites.
 
 ## How to test whether this is worth building
 
