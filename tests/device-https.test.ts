@@ -64,7 +64,7 @@ test('--https enrolls once with open registration, issues via native DNS-01 with
 test('--https renews automatically inside the 30-day window and serves the replacement', async () => {
   const home = await mkdtemp(join(tmpdir(), 'haze-device-renew-'));
   const expiring = localAcme({ leafDays: 20 });
-  const fresh = localAcme({ leafDays: 90 });
+  let savedAccountKey: Parameters<typeof issueCertificate>[0]['accountKey'];
   const h = harness(home);
   h.answers.push('yes');
   const issue = (server: ReturnType<typeof localAcme>) => (options: Parameters<typeof issueCertificate>[0]) =>
@@ -72,6 +72,11 @@ test('--https renews automatically inside the 30-day window and serves the repla
   try {
     const initial = await deviceHttps({ host: '10.0.0.2', provisionScript: '/script.mjs', home, ask: h.ask, run: h.run, log: h.log, acme: issue(expiring) });
     assert.ok(Date.parse(new X509Certificate(initial.tls.cert).validTo) < Date.now() + 30 * 24 * 60 * 60 * 1000);
+    // Read the saved ACME account key and seed a fresh CA with it, as a real CA would know the account.
+    const { createPrivateKey } = await import('node:crypto');
+    const { readFile } = await import('node:fs/promises');
+    savedAccountKey = createPrivateKey(await readFile(join(home, '.haze', 'acme', TEST_HOSTNAME, 'acme-account-key.pem')));
+    const fresh = localAcme({ leafDays: 90, accountKey: savedAccountKey });
     const askedBeforeRenewal = h.asked.length;
     const renewed = await deviceHttps({ host: '10.0.0.2', provisionScript: '/script.mjs', home, ask: h.ask, run: h.run, log: h.log, acme: issue(fresh) });
     assert.notEqual(renewed.tls.cert.toString(), initial.tls.cert.toString(), 'An expiring certificate is replaced');
@@ -97,6 +102,6 @@ test('--https refuses loopback, declined consent, and failed issuance while reta
     h.answers.push('yes');
     await assert.rejects(deviceHttps({ host: '10.0.0.2', provisionScript: '/script.mjs', home, ask: h.ask, run: h.run, log: h.log, acme: issue }), /issuance\/renewal failed/);
     assert.ok((await readFile(join(home, '.haze', 'provision', 'installation.json'), 'utf8')).includes(TEST_HOSTNAME), 'Registration is retained for retry');
-    assert.ok(h.calls.some(call => call[0] === 'challenge-cleanup'), 'A failed validation still cleans up its challenge');
+    assert.ok(h.calls.some(call => call[0] === 'challenge-cleanup'), 'A failed run still cleans up its DNS challenge');
   } finally { await rm(home, { recursive: true, force: true }); }
 });

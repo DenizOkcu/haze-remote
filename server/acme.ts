@@ -14,6 +14,37 @@ const OID = {
 const base64url = (data: Buffer | string) => Buffer.from(data).toString('base64url');
 const sha256 = (data: Buffer | string) => createHash('sha256').update(data).digest();
 
+/** JOSE ES256 requires the raw R||S signature, not ASN.1 DER. */
+function es256Signature(der: Buffer): Buffer {
+  // SEQUENCE(len) INTEGER-R INTEGER-S; leading 0x00 sign bytes are dropped per RFC 7515.
+  let position = 0;
+  const readHeader = () => {
+    const tag = der[position++];
+    if (tag !== 0x30 && tag !== 0x02) throw new Error('Unexpected DER element');
+    let length = der[position++];
+    if (length & 0x80) {
+      const bytes = length & 0x7f;
+      length = 0;
+      for (let i = 0; i < bytes; i++) length = length * 256 + der[position++];
+    }
+    return { end: position + length };
+  };
+  const sequence = readHeader();
+  const integer = () => {
+    const { end } = readHeader();
+    let value = der.subarray(position, end);
+    if (value.length > 1 && value[0] === 0) value = value.subarray(1);
+    if (value.length > 32) throw new Error('Integer exceeds ES256 field size');
+    const padded = Buffer.alloc(32); value.copy(padded, 32 - value.length);
+    position = end;
+    return padded;
+  };
+  const r = integer();
+  if (position >= sequence.end) throw new Error('DER integer missing');
+  const s = integer();
+  return Buffer.concat([r, s]);
+}
+
 function tlv(tag: number, content: Buffer): Buffer {
   const length = content.length < 128 ? Buffer.from([content.length])
     : content.length < 256 ? Buffer.from([0x81, content.length]) : Buffer.from([0x82, content.length >> 8, content.length & 0xff]);
@@ -60,7 +91,7 @@ export async function issueCertificate(options: {
   async function signed(url: string, payload: Record<string, unknown>, useKid: boolean) {
     const head = { alg: 'ES256', url, nonce: await takeNonce(url), ...(useKid ? { kid: accountUrl } : { jwk }) };
     const body = `${base64url(JSON.stringify(head))}.${base64url(JSON.stringify(payload))}`;
-    const signature = base64url(createSign('SHA256').update(body).sign(accountKey) as Buffer);
+    const signature = base64url(es256Signature(createSign('SHA256').update(body).sign(accountKey) as Buffer));
     const response = await request(url, { method: 'POST', headers: { 'Content-Type': 'application/jose+json', 'User-Agent': USER_AGENT },
       body: JSON.stringify({ protected: base64url(JSON.stringify(head)), payload: base64url(JSON.stringify(payload)), signature }) });
     const next = response.headers.get('replay-nonce');
