@@ -75,8 +75,10 @@ function validateNumericPeer(selection: LanSelection, address: string): void {
     throw new Error('Remote address is outside the selected OS interface subnet');
   }
   const broadcast = (selection.network | (~maskFor(selection.prefix) >>> 0)) >>> 0;
-  if (address === selection.address || (selection.prefix <= 30 && (value === selection.network || value === broadcast))) {
-    throw new Error('Remote address must be a peer, not self, network or broadcast');
+  // The interface's own address is a permitted peer: same-machine browsers connect
+  // through it (hairpin), and its possession still requires the pairing secret.
+  if (selection.prefix <= 30 && (value === selection.network || value === broadcast)) {
+    throw new Error('Remote address must not be the network or broadcast address');
   }
 }
 
@@ -196,8 +198,12 @@ export function validateSdpCandidates(selection: LanSelection, sdp: string): rea
  * disable STUN/TURN, and revalidate on every pair change before application data.
  */
 export function validateSelectedRemotePath(selection: LanSelection, path: LanRemotePath): void {
-  if (path.protocol.toLowerCase() !== 'udp' || path.localCandidateType !== 'host' || path.remoteCandidateType !== 'host') {
-    throw new Error('Selected path must be UDP with local and remote host candidates');
+  if (path.protocol.toLowerCase() !== 'udp' || path.localCandidateType !== 'host' || !['host', 'prflx'].includes(path.remoteCandidateType)) {
+    // The remote side is prflx when a browser (mDNS-only host candidates) connects to
+    // this ICE-lite peer: the pair's remote address is the STUN check's actual source,
+    // which the subnet check below still must permit. Advertised srflx/relay remain
+    // impossible here because signaling candidates were never admitted to ICE.
+    throw new Error('Selected path must be UDP with a local host candidate and a host/prflx remote');
   }
   ipv4(path.localAddress);
   if (path.localAddress !== selection.address) throw new Error('Selected local path is not the approved OS interface address');

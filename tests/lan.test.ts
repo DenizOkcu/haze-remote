@@ -70,10 +70,11 @@ test('only well formed UDP host candidates inside the exact interface subnet pas
     address: '192.168.50.20', port: 50000, component: 1, status: 'numeric-validated',
   });
   for (const address of ['192.168.60.20', '10.1.1.1', '172.16.1.1', '100.64.1.1', '127.0.0.1', '8.8.8.8',
-    '192.168.50.0', '192.168.50.255', options.address, 'example.com', '192.168.050.20']) {
+    '192.168.50.0', '192.168.50.255', 'example.com', '192.168.050.20']) {
     assert.throws(() => validateIceCandidate(selected, candidate(address)), undefined, address);
   }
-  assert.throws(() => validateIceCandidate(selected, candidate('fd00::20')), /IPv6.*unsupported/);
+  assert.equal(validateIceCandidate(selected, candidate(options.address)).status, 'numeric-validated',
+    'same-machine browsers peer through the interface address');
   for (const type of ['srflx', 'relay', 'prflx']) assert.throws(() => validateIceCandidate(selected, candidate('192.168.50.20', 'UDP', type)), /only UDP host/);
   assert.throws(() => validateIceCandidate(selected, candidate('192.168.50.20', 'TCP')), /only UDP host/);
   for (const line of ['candidate:bad', candidate('192.168.50.20').replace('50000', '0'),
@@ -105,11 +106,15 @@ test('SDP validates all media candidates; candidate-free trickle is not path aut
 
 test('actual selected numeric path enforces the exact local interface and remote UDP host peer', () => {
   for (const change of [{ localAddress: '192.168.60.10' }, { localAddress: '0.0.0.0' }, { protocol: 'tcp' },
-    { localCandidateType: 'relay' }, { remoteCandidateType: 'srflx' }, { remoteAddress: '100.64.0.1' },
-    { remoteAddress: options.address }, { remoteAddress: '192.168.50.255' }]) {
+    { localCandidateType: 'relay' }, { remoteCandidateType: 'srflx' }, { remoteCandidateType: 'relay' }, { remoteAddress: '100.64.0.1' },
+    { remoteAddress: '192.168.50.255' }]) {
     assert.throws(() => validateSelectedRemotePath(selected, { ...path, ...change }));
   }
+  // Same-machine browsers connect through the interface's own address (hairpin).
+  assert.doesNotThrow(() => validateSelectedRemotePath(selected, { ...path, remoteAddress: options.address }));
   assert.throws(() => validateSelectedRemotePath(selected, { ...path, remoteAddress: '::ffff:192.168.50.20' }), /IPv6.*unsupported/);
+  // A browser's inbound STUN check yields a peer-reflexive remote; subnet rules still apply.
+  assert.doesNotThrow(() => validateSelectedRemotePath(selected, { ...path, remoteCandidateType: 'prflx' }));
 });
 
 test('plain startup automatically derives the sole LAN subnet, including the reported /22', async () => {

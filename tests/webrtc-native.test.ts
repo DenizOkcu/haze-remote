@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Connection, StunProtocol, Event, type RTCDataChannel, type RTCPeerConnection } from 'werift';
 import { encodeFrames, Framer, RTC_FRAME_LIMIT, RTC_WIRE_LIMIT } from '../shared/rtc-framing.js';
-import { descriptionFingerprint, numericCandidate, selectedPeerAddress, RtcRemoteSocket, startLanPeer, restrictHostGathering, validateLocalCandidates } from '../server/webrtc.js';
+import { descriptionFingerprint, admitsRemoteCandidate, selectedPeerAddress, RtcRemoteSocket, startLanPeer, restrictHostGathering, validateLocalCandidates } from '../server/webrtc.js';
 import { SignalingClient } from '../shared/signaling.js';
 import type { LanSelection } from '../server/lan.js';
 
@@ -45,17 +45,14 @@ test('DTLS bindings require one consistent SHA256 fingerprint', () => {
   for (const sdp of ['v=0', `a=fingerprint:sha-1 ${fp}`, 'a=fingerprint:sha-256 ab', `a=fingerprint:sha-256 ${fp}\na=fingerprint:sha-256 ${Array(32).fill('CD').join(':')}`]) assert.throws(() => descriptionFingerprint(sdp));
 });
 
-test('mDNS resolved address is numeric/subnet checked before ICE and numeric candidates never resolve', async () => {
-  let calls = 0;
-  assert.equal(await numericCandidate(lan, candidate('browser.local'), async () => { calls++; return '192.168.4.22'; }), candidate('192.168.4.22'));
-  await numericCandidate(lan, candidate('192.168.4.23'), async () => { throw new Error('must not resolve'); });
-  assert.equal(calls, 1);
-  for (const address of ['192.168.5.2', '8.8.8.8', '127.0.0.1', '::1', 'again.local', '192.168.4.10', '192.168.4.255']) {
-    await assert.rejects(numericCandidate(lan, candidate('browser.local'), async () => address));
-  }
-  for (const line of [candidate('8.8.8.8'), candidate('192.168.4.22').replace('typ host', 'typ relay'), candidate('192.168.4.22').replace('UDP', 'TCP')]) {
-    await assert.rejects(numericCandidate(lan, line, async () => { throw new Error('must not resolve'); }));
-  }
+test('remote candidates are admitted only when numeric, in-subnet and host; .local mDNS never reaches ICE', () => {
+  assert.equal(admitsRemoteCandidate(lan, candidate('192.168.4.22')), true);
+  assert.equal(admitsRemoteCandidate(lan, candidate(lan.address)), true, 'same-machine hairpin peer');
+  for (const line of [
+    candidate('browser.local'), candidate('192.168.5.2'), candidate('8.8.8.8'), candidate('127.0.0.1'), candidate('::1'),
+    candidate('192.168.4.22').replace('typ host', 'typ relay'), candidate('192.168.4.22').replace('UDP', 'TCP'),
+    candidate('192.168.4.22').replace(' 1 UDP', ' 2 UDP'),
+  ]) assert.equal(admitsRemoteCandidate(lan, line), false, line);
 });
 
 test('native nominated pair authorization re-reads pair changes and requires connected DTLS', () => {
@@ -67,7 +64,8 @@ test('native nominated pair authorization re-reads pair changes and requires con
   assert.equal(check(), '192.168.4.22');
   pair.remoteAddr[0] = '192.168.5.22'; assert.throws(check);
   pair.remoteAddr[0] = '192.168.4.22'; pair.localCandidate.host = '192.168.4.11'; assert.throws(check);
-  pair.localCandidate.host = lan.address; pair.remoteCandidate.type = 'prflx'; assert.throws(check);
+  pair.localCandidate.host = lan.address; pair.remoteCandidate.type = 'srflx'; assert.throws(check);
+  pair.remoteCandidate.type = 'prflx'; assert.equal(check(), '192.168.4.22', 'peer-reflexive browser source is valid');
   pair.remoteCandidate.type = 'host'; native.dtlsTransports[0].state = 'connecting'; assert.throws(check);
   native.dtlsTransports[0].state = 'connected'; native.iceTransports[0].connection.nominated = undefined; assert.throws(check);
 });
@@ -132,6 +130,30 @@ test('native gather input excludes extra interfaces and missing selected address
   validateLocalCandidates(`a=${candidate(lan.address)}`, lan);
   for (const sdp of ['', `a=${candidate('192.168.5.10')}`, `a=${candidate(lan.address).replace('typ host', 'typ srflx')}`,
     `a=${candidate(lan.address)}\r\na=${candidate('192.168.5.10')}`]) assert.throws(() => validateLocalCandidates(sdp, lan));
+});
+
+test('rejected or out-of-subnet candidates are skipped, not fatal; a permitted candidate still connects the poll', async t => {
+  loopbackGather(t);
+  const signals: any[] = [
+    { type: 'candidate', candidate: candidate('8.8.8.8'), sdpMid: '0', sdpMLineIndex: 0 },
+    { type: 'candidate', candidate: candidate('192.168.9.9'), sdpMid: '0', sdpMLineIndex: 0 },
+    { type: 'candidate', candidate: candidate('some-host.local'), sdpMid: '0', sdpMLineIndex: 0 },
+    { type: 'candidate', candidate: candidate('192.168.4.77'), sdpMid: '0', sdpMLineIndex: 0 },
+  ];
+  const errors: string[] = [];
+  let leaves = 0;
+  t.mock.method(SignalingClient, 'create', async () => ({
+    send: async () => {},
+    receive: async () => signals.splice(0, 8),
+    leave: async () => { leaves++; },
+    close: async () => {},
+  }));
+  const host = await startLanPeer({ lan: { ...lan, address: '127.0.0.1' }, roomId: 'fixture', onSocket: () => assert.fail(), onError: message => errors.push(message) });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 900));
+    assert.deepEqual(errors, [], 'no recovery must be triggered by rejected candidates');
+    assert.equal(leaves, 0, 'the browser lease must not be invalidated');
+  } finally { await host.close(); }
 });
 
 test('poll failures recover with leave + new offer, bounded backoff and shutdown cancellation', async t => {

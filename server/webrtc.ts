@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events';
-import { createRequire } from 'node:module';
 import { RTCPeerConnection, RTCRtpCodecParameters, type RTCDataChannel } from 'werift';
 import { SignalingClient } from '../shared/signaling.js';
 import { encodeFrames, Framer, RTC_WIRE_LIMIT } from '../shared/rtc-framing.js';
@@ -29,56 +28,19 @@ export function descriptionFingerprint(sdp: string): string {
   return values[0];
 }
 
-/** Resolution is completed and revalidated BEFORE werift sees the candidate.
- * werift 0.25's built-in MdnsLookup takes the first A answer and addRemoteCandidate
- * replaces host without policy validation. Never pass a .local name to that path.
+/** ICE-lite pairing strategy: the native peer advertises its own numeric host
+ *  candidate in the offer; the browser connects TO it, so remote .local mDNS
+ *  candidates never need resolution and are simply ignored. Network membership is
+ *  proven by the actual selected pair's source address, which must be a permitted
+ *  LAN peer before any authentication or application data flows.
  */
-export async function numericCandidate(lan: LanSelection, candidate: string, resolve: (name: string) => Promise<string>): Promise<string> {
-  const parsed = validateIceCandidate(lan, candidate);
-  if (parsed.component !== 1) throw new Error('Only RTP component is supported');
-  const fields = candidate.trim().replace(/^a=/, '').split(/\s+/);
-  if (parsed.status === 'pending-native-resolution') {
-    fields[4] = await resolve(parsed.address);
-    const numeric = validateIceCandidate(lan, fields.join(' '));
-    if (numeric.status !== 'numeric-validated') throw new Error('Numeric mDNS answer required');
-  }
-  return fields.join(' ');
+export function admitsRemoteCandidate(lan: LanSelection, candidate: string): boolean {
+  try {
+    const parsed = validateIceCandidate(lan, candidate);
+    return parsed.component === 1 && parsed.status === 'numeric-validated';
+  } catch { return false; }
 }
 
-// Use werift's installed multicast-dns dependency with cancellable lookups rather
-// than its uncancellable 10s MdnsLookup timer. No unicast DNS fallback.
-function resolver(lan: LanSelection) {
-  const require = createRequire(import.meta.url);
-  const mdns = createRequire(require.resolve('werift'))('multicast-dns')({ interface: lan.address }) as {
-    on(event: string, fn: (packet: any) => void): void;
-    removeListener(event: string, fn: (packet: any) => void): void;
-    query(name: string, type: string): void;
-    destroy(): void;
-  };
-  const pending = new Set<() => void>();
-  let closed = false;
-  mdns.on('error', () => { closed = true; for (const cancel of [...pending]) cancel(); });
-  mdns.on('warning', () => { for (const cancel of [...pending]) cancel(); });
-  return {
-    lookup(name: string): Promise<string> {
-      if (closed) return Promise.reject(new Error('Resolution closed'));
-      return new Promise((resolve, reject) => {
-        const cleanup = () => { clearTimeout(timer); mdns.removeListener('response', response); pending.delete(cancel); };
-        const cancel = () => { cleanup(); reject(new Error('mDNS resolution failed')); };
-        const response = (packet: any) => {
-          const answers = (packet.answers ?? []).filter((a: any) => a.name?.toLowerCase() === name.toLowerCase() && a.type === 'A');
-          if (!answers.length) return;
-          const addresses = new Set(answers.map((a: any) => a.data));
-          if (addresses.size !== 1 || typeof answers[0].data !== 'string') { cancel(); return; }
-          cleanup(); resolve(answers[0].data);
-        };
-        const timer = setTimeout(cancel, 3000);
-        pending.add(cancel); mdns.on('response', response); mdns.query(name, 'A');
-      });
-    },
-    close() { closed = true; for (const cancel of [...pending]) cancel(); mdns.destroy(); },
-  };
-}
 
 export class RtcRemoteSocket extends EventEmitter implements RemoteSocket {
   private ended = false;
@@ -177,7 +139,6 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
   let stopped = false;
   let pc: RTCPeerConnection | undefined;
   let socket: RtcRemoteSocket | undefined;
-  let dns: ReturnType<typeof resolver> | undefined;
   let poll: ReturnType<typeof setTimeout> | undefined;
   let watch: ReturnType<typeof setInterval> | undefined;
   let generation = 0;
@@ -185,13 +146,17 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let retries = 0;
-  const report = (message = 'LAN WebRTC connection failed. Check guest Wi-Fi isolation and UDP firewall rules; no relay is used. Reset pairing and retry.') => options.onError?.(message);
+  // A rejected candidate is evidence about one address, not a fatal protocol error.
+  // Counting keeps hostile candidates bounded while valid permitted peers still connect.
+  let rejectedCandidates = 0;
+  let lastFailure = '';
+  const note = (reason: string) => { lastFailure = reason; };
+  const report = (message?: string) => options.onError?.(message ?? 'LAN WebRTC connection failed. Check guest Wi-Fi isolation and UDP firewall rules; no relay is used. Reset pairing and retry.');
   const release = async () => {
     generation++;
     if (poll) clearTimeout(poll); if (watch) clearInterval(watch);
     if (deadline) clearTimeout(deadline); if (retry) clearTimeout(retry);
     poll = undefined; watch = undefined; deadline = undefined; retry = undefined;
-    dns?.close(); dns = undefined;
     // Detach before close: close listeners enqueue recovery, never await this operation.
     const oldSocket = socket; socket = undefined; oldSocket?.close();
     const old = pc; pc = undefined; await old?.close();
@@ -199,7 +164,6 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
   const launch = async () => {
     const id = generation;
     const alive = () => !stopped && generation === id;
-    dns = resolver(options.lan); const lookup = dns;
     const pairAllowed = (pair: any) => {
       try {
         validateSelectedRemotePath(options.lan, { localAddress: pair.localCandidate.host, remoteAddress: pair.remoteAddr[0],
@@ -247,7 +211,7 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
     });
     watch = setInterval(() => { if (!alive()) return; attach(); if (attached && !approved()) socket?.close(); }, 50);
     restrictHostGathering(peer, options.lan);
-    deadline = setTimeout(() => { if (alive()) recover(id, 'LAN connection timed out after 30 seconds. Disable guest Wi-Fi/client isolation and allow UDP through the firewall; no relay is available. Reset pairing if retries fail.'); }, 30_000);
+    deadline = setTimeout(() => { if (alive()) recover(id, `no direct LAN connection within 30 seconds${lastFailure ? ` (${lastFailure})` : ''}. Disable guest Wi-Fi/client isolation, allow UDP and local-network access on both devices, and ensure both are on ${options.lan.subnet}. No relay is available.`); }, 30_000);
     await peer.setLocalDescription(await peer.createOffer());
     if (!alive()) return;
     validateLocalCandidates(peer.localDescription!.sdp, options.lan);
@@ -262,18 +226,22 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
           if (signal.type === 'answer') {
             if (answered) throw new Error('Unexpected answer');
             descriptionFingerprint(signal.sdp);
-            const lines = signal.sdp.split(/\r?\n/);
-            for (let i = 0; i < lines.length; i++) if (/^a=candidate:/i.test(lines[i])) {
-              if (++candidates > 128) throw new Error('Too many candidates');
-              lines[i] = `a=${await numericCandidate(options.lan, lines[i], name => lookup.lookup(name))}`;
-            }
+            // ICE-lite: the browser connects to our numeric host candidate. Drop every
+            // remote candidate (numeric or .local) instead of feeding any to ICE; the
+            // selected pair's source address remains the sole network authorization.
+            const lines = signal.sdp.split(/\r?\n/).filter(line => !/^a=candidate:/i.test(line));
             if (!alive()) return;
             await peer.setRemoteDescription({ type: 'answer', sdp: lines.join('\r\n') }); answered = true;
           } else if (signal.type === 'candidate') {
             if (++candidates > 128) throw new Error('Too many candidates');
-            const candidate = await numericCandidate(options.lan, signal.candidate, name => lookup.lookup(name));
+            if (!admitsRemoteCandidate(options.lan, signal.candidate)) {
+              // mDNS (.local) and out-of-subnet candidates are expected and ignored.
+              if (++rejectedCandidates > 64) throw new Error('Too many rejected candidates');
+              return;
+            }
+            rejectedCandidates = 0;
             if (!alive()) return;
-            await peer.addIceCandidate({ candidate, sdpMid: signal.sdpMid, sdpMLineIndex: signal.sdpMLineIndex });
+            await peer.addIceCandidate({ candidate: signal.candidate, sdpMid: signal.sdpMid, sdpMLineIndex: signal.sdpMLineIndex });
           } else throw new Error('Unexpected offer');
         }
       } catch { if (alive()) recover(id); return; }
@@ -289,7 +257,9 @@ export async function startLanPeer(options: LanPeerOptions): Promise<{ close(): 
     operation = operation.catch(() => {}).then(async () => {
       await release();
       if (stopped) return;
-      report(message);
+      report(message ?? (lastFailure
+        ? `LAN WebRTC connection failed: ${lastFailure}. Both devices must be on ${options.lan.subnet} with guest Wi-Fi/client isolation off and local network access allowed. No relay is used.`
+        : 'LAN WebRTC connection failed. Check guest Wi-Fi isolation and UDP firewall rules; no relay is used. Reset pairing and retry.'));
       if (retries >= 3) { report('LAN pairing stopped after 3 retries. Check Wi-Fi isolation/firewall and generate a new pairing link. No relay is used.'); return; }
       const delay = 500 * 2 ** retries++;
       const next = generation;
